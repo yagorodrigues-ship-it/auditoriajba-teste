@@ -6,7 +6,7 @@ import psycopg2.extras
 import io
 import re
 import time
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, unquote
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
@@ -34,14 +34,32 @@ LISTA_ESTOQUES_FIXA = [
 ]
 MAPA_ESTOQUES_DESC = {item['id']: item['desc'] for item in LISTA_ESTOQUES_FIXA}
 
-# --- CONEXÃO DIRETA E SEGURA ---
+# --- CONEXÃO PARSEADA E RESISTENTE (NEON.TECH COMPATÍVEL) ---
 def conectar_banco():
     db_url = st.secrets["postgres"]["url"]
+    
+    # Faz a extração segura dos parâmetros da URL
+    parsed = urlparse(db_url)
+    username = unquote(parsed.username) if parsed.username else ""
+    password = unquote(parsed.password) if parsed.password else ""
+    hostname = parsed.hostname or ""
+    port = parsed.port or 5432
+    database = parsed.path.lstrip('/') or "neondb"
+    
     for tentativa in range(3):
         try:
-            return psycopg2.connect(db_url, sslmode='require', connect_timeout=5)
-        except Exception:
+            return psycopg2.connect(
+                host=hostname,
+                port=port,
+                user=username,
+                password=password,
+                dbname=database,
+                sslmode='require',
+                connect_timeout=5
+            )
+        except Exception as e:
             if tentativa == 2:
+                # Tenta conexão padrão direta caso o parse falhe
                 return psycopg2.connect(db_url)
             time.sleep(0.3)
 
@@ -232,7 +250,7 @@ if not st.session_state.logged_in:
     col_vaz1, col_central, col_vaz2 = st.columns([1, 1.2, 1])
     with col_central:
         if st.session_state.tela_acesso == "login":
-            st.title("🔒 Acesso ao Sistema JBA")
+            st.title("🔒 Acesso ao Sistema JBA (Neon)")
             with st.form("login_form"):
                 identificador = st.text_input("CPF ou E-mail")
                 senha = st.text_input("Senha", type="password")
