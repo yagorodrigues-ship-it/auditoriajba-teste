@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets sem armazenar em cache para garantir sincronia automática."""
+    """Lê uma aba do Google Sheets de forma bruta para evitar erros com campos nulos ou decimais."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -431,6 +431,7 @@ else:
                     df_inv_up.loc[mascara, 'total_itens'] = tot
                     df_inv_up.loc[mascara, 'acuracidade_final'] = pct_acu
                     atualizar_aba_completa("inventarios", df_inv_up)
+                limpar_cache_aplicacao()
 
             if pode_fechar:
                 if st.button("🔒 Fechar Inventário (100% Concluído)", use_container_width=True, type="primary"):
@@ -446,10 +447,10 @@ else:
                         st.success("✅ Inventário encerrado!")
                         st.rerun()
 
-        # KPIs SIDEBAR
+        # KPIs SIDEBAR (CORRIGIDO)
         total_itens_base = len(base_sistema_atual) if not base_sistema_atual.empty else 0
         df_cnt_cnt = ler_aba("contagens")
-        df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_pasta.empty else pd.DataFrame()
+        df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_cnt.empty else pd.DataFrame()
         total_contados_cnt = len(df_cnt_pasta)
         
         st.markdown(f'<div class="card-lateral"><div class="card-lateral-titulo">📋 ITENS NA BASE</div><div class="card-lateral-valor">{total_itens_base}</div></div>', unsafe_allow_html=True)
