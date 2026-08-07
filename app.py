@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets de forma bruta para evitar erros com campos nulos ou decimais."""
+    """Lê uma aba do Google Sheets de forma bruta e segura."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -44,7 +44,7 @@ def ler_aba(nome_aba):
         return pd.DataFrame()
 
 def anexar_linha_aba(nome_aba, novos_dados_df):
-    """Adiciona novas linhas ao final da aba e invalida o cache automaticamente."""
+    """Adiciona novas linhas ao final da aba no Google Sheets."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -60,8 +60,6 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
             df_final = df_final.astype(str)
             ws.clear()
             ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-            
-            # AUTOMATIZAÇÃO DA ATUALIZAÇÃO DE DADOS
             st.cache_data.clear()
             return True
         return False
@@ -70,7 +68,7 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba e atualiza o estado da aplicação automaticamente."""
+    """Substitui o conteúdo de uma aba garantindo a limpeza das linhas antigas."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -82,8 +80,6 @@ def atualizar_aba_completa(nome_aba, df_completo):
                 ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
             else:
                 ws.clear()
-            
-            # AUTOMATIZAÇÃO DA ATUALIZAÇÃO DE DADOS
             st.cache_data.clear()
             return True
         return False
@@ -114,6 +110,8 @@ MAPA_ESTOQUES_DESC = {item['id']: item['desc'] for item in LISTA_ESTOQUES_FIXA}
 
 def limpar_cache_aplicacao():
     st.cache_data.clear()
+    if 'cache_inventarios_local' in st.session_state:
+        del st.session_state['cache_inventarios_local']
 
 def limpar_documento(doc):
     return str(doc).strip().replace(".", "").replace("-", "").replace("/", "")
@@ -252,7 +250,13 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
-    df_inventarios = ler_aba("inventarios")
+    # LEITURA COM CACHE LOCAL DE SEGURANÇA PARA EVITAR TELA ZERADA PÓS-RERUN
+    df_inv_sheets = ler_aba("inventarios")
+    if not df_inv_sheets.empty:
+        st.session_state['cache_inventarios_local'] = df_inv_sheets
+    
+    df_inventarios = st.session_state.get('cache_inventarios_local', pd.DataFrame())
+
     if not df_inventarios.empty and 'id' in df_inventarios.columns:
         df_inventarios['id_clean'] = df_inventarios['id'].astype(str).str.replace('#', '', regex=False).str.strip()
         df_inventarios['id_num'] = pd.to_numeric(df_inventarios['id_clean'], errors='coerce').fillna(0)
@@ -270,7 +274,7 @@ else:
     # --- BARRA LATERAL ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.operador}** ({st.session_state.perfil_usuario})")
-        st.success("🟢 Sincronização automática com Google Sheets ativa.")
+        st.success("🟢 Sincronização automática ativa.")
 
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -380,9 +384,14 @@ else:
                         "total_itens": 0,
                         "acuracidade_final": "0%"
                     }])
+                    
+                    # ATUALIZA A MEMÓRIA LOCAL PRIMEIRO
+                    if 'cache_inventarios_local' in st.session_state:
+                        st.session_state['cache_inventarios_local'] = pd.concat([st.session_state['cache_inventarios_local'], df_novo_inv], ignore_index=True)
+                    
                     anexar_linha_aba("inventarios", df_novo_inv)
                     st.toast(f"✅ Pasta {novo_id_str} registrada!", icon="🎉")
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     st.rerun()
 
         # FECHAMENTO DO INVENTÁRIO
@@ -447,7 +456,7 @@ else:
                         st.success("✅ Inventário encerrado!")
                         st.rerun()
 
-        # KPIs SIDEBAR (CORRIGIDO)
+        # KPIs SIDEBAR
         total_itens_base = len(base_sistema_atual) if not base_sistema_atual.empty else 0
         df_cnt_cnt = ler_aba("contagens")
         df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_cnt.empty else pd.DataFrame()
