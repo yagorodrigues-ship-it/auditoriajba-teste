@@ -12,17 +12,14 @@ from openpyxl.styles import PatternFill
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Auditoria & Inventário - JBA (TESTE DRIVE)", layout="wide")
 
-# --- CONEXÃO DIRETA E GARANTIDA COM GOOGLE SHEETS VIA SERVICE ACCOUNT ---
+# --- CONEXÃO COM O GOOGLE SHEETS VIA SERVICE ACCOUNT ---
 @st.cache_resource
 def conectar_gspread():
     try:
         scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        
-        # Pega as credenciais direto dos Secrets do Streamlit Cloud
         info_dict = dict(st.secrets["connections"]["gsheets"])
         creds = Credentials.from_service_account_info(info_dict, scopes=scope)
         gc = gspread.authorize(creds)
-        
         url_planilha = st.secrets["gconfigs"]["spreadsheet_url"]
         return gc.open_by_url(url_planilha)
     except Exception as e:
@@ -30,26 +27,30 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba da planilha diretamente com gspread."""
+    """Lê uma aba do Google Sheets e padroniza as colunas."""
     try:
         sh = conectar_gspread()
         if sh:
             ws = sh.worksheet(nome_aba)
             dados = ws.get_all_records()
-            df = pd.DataFrame(dados).fillna("")
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            return df
+            if dados:
+                df = pd.DataFrame(dados).fillna("")
+                df.columns = [str(c).strip().lower() for c in df.columns]
+                return df
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Insere novos registros no final da aba do Google Sheets."""
+    """Insere novos registros na aba mantendo a persistência."""
     try:
         sh = conectar_gspread()
         if sh:
             ws = sh.worksheet(nome_aba)
             df_ex = ler_aba(nome_aba)
+            
+            # Normaliza cabeçalhos
+            novos_dados_df.columns = [str(c).strip().lower() for c in novos_dados_df.columns]
             
             if not df_ex.empty:
                 df_final = pd.concat([df_ex, novos_dados_df], ignore_index=True)
@@ -67,11 +68,12 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo inteiro da aba."""
+    """Substitui o conteúdo de uma aba."""
     try:
         sh = conectar_gspread()
         if sh:
             ws = sh.worksheet(nome_aba)
+            df_completo.columns = [str(c).strip().lower() for c in df_completo.columns]
             df_completo = df_completo.astype(str)
             ws.clear()
             ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
@@ -279,10 +281,10 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
+    # LÊ DO GOOGLE SHEETS E COMBINA COM A MEMÓRIA RAM
     df_inv_drive = ler_aba("inventarios")
     if not df_inv_drive.empty and 'id' in df_inv_drive.columns:
         df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id'].astype(str).str.replace('#', '', regex=False), errors='coerce').fillna(0)
-        df_inv_drive = df_inv_drive.sort_values(by=['data', 'id_num'], ascending=[False, False])
     else:
         df_inv_drive = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
 
@@ -292,8 +294,10 @@ else:
     else:
         df_inventarios = df_inv_drive.copy()
 
-    df_inventarios_sup = ler_aba("inventarios_supervisor")
+    if not df_inventarios.empty and 'id_num' in df_inventarios.columns:
+        df_inventarios = df_inventarios.sort_values(by=['data', 'id_num'], ascending=[False, False])
 
+    df_inventarios_sup = ler_aba("inventarios_supervisor")
     eh_supervisor = (st.session_state.perfil_usuario == "Administrador") or ("admin" in st.session_state.operador.lower())
 
     # --- BARRA LATERAL ---
@@ -386,11 +390,9 @@ else:
         if inventario_selected_obj is not None and str(inventario_selected_obj['status']) == "Aberto" and not base_sistema_atual.empty:
             st.markdown("---")
             if st.button("🚀 Salvar Base e Iniciar 1ª Contagem", type="primary", use_container_width=True):
-                for inv in st.session_state.buffer_ram_inventarios:
-                    if str(inv['id']) == str(id_inventario_atual):
-                        inv['status'] = '1a Contagem'
-                
-                if not df_inv_drive.empty and str(id_inventario_atual) in df_inv_drive['id'].astype(str).values:
+                sincronizar_ram_com_banco()
+                df_inv_drive = ler_aba("inventarios")
+                if not df_inv_drive.empty:
                     df_inv_drive.loc[df_inv_drive['id'].astype(str) == str(id_inventario_atual), 'status'] = '1a Contagem'
                     atualizar_aba_completa("inventarios", df_inv_drive)
 
@@ -449,17 +451,17 @@ else:
 
             st.markdown("---")
             def fechar_e_preservar_historico(id_inv, id_limpo):
-                # 1. Força a gravação de tudo que está na RAM para o Drive primeiro
+                # 1. Envia tudo para o Google Sheets
                 sincronizar_ram_com_banco()
                 
-                # 2. Recarrega as contagens gravadas para calcular a acuracidade exata
+                # 2. Recarrega as contagens para calcular acuracidade
                 df_cnts = ler_aba("contagens")
                 df_f = df_cnts[df_cnts['inventario_id'].astype(str) == id_limpo] if not df_cnts.empty else pd.DataFrame()
                 tot = len(df_f)
                 acertos = len(df_f[pd.to_numeric(df_f['diferenca'], errors='coerce') == 0]) if tot > 0 else 0
                 pct_acu = f"{(acertos / tot)*100:.1f}%" if tot > 0 else "0%"
                 
-                # 3. Atualiza o registro no Google Sheets
+                # 3. Atualiza o status na planilha
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
                     df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'status'] = 'Fechado'
@@ -755,9 +757,9 @@ else:
                             limpar_cache_aplicacao()
                             st.rerun()
 
-    # --- ABA 4: HISTÓRICO GERAL (PAGINAÇÃO DE 10 EM 10) ---
+    # --- ABA 4: HISTÓRICO GERAL (VISÍVEL PARA TODOS OS COLABORADORES) ---
     with aba_historico:
-        st.title("📁 Arquivo Geral de Movimentações (Google Drive)")
+        st.title("📁 Arquivo Geral de Movimentações")
         if df_inventarios.empty or 'id' not in df_inventarios.columns: 
             st.info("Nenhum inventário registrado.")
         else:
@@ -779,7 +781,6 @@ else:
                 id_proc = str(inv['id']).replace('#','').strip()
                 df_cnts_todas = ler_aba("contagens")
                 
-                # Junta lançamentos salvos no Drive + lançamentos pendentes em RAM
                 df_h_drive = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
                 df_h_ram = pd.DataFrame([c for c in st.session_state.buffer_ram_contagens if str(c['inventario_id']) == id_proc])
                 
@@ -817,7 +818,7 @@ else:
                     st.session_state.pagina_historico += 1
                     st.rerun()
 
-    # --- ABA 5: GESTÃO ADM (COMPLETA COM TODOS OS MÓDULOS) ---
+    # --- ABA 5: GESTÃO ADM ---
     if eh_supervisor and aba_adm is not None:
         with aba_adm:
             st.title("⚙️ Módulo de Gestão do Administrador (Google Drive)")
