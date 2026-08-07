@@ -425,26 +425,35 @@ else:
         if inventario_selected_obj is not None and str(inventario_selected_obj['status']) in ["1a Contagem", "2a Contagem"] and not base_sistema_atual.empty:
             df_cnts_todas = ler_aba("contagens")
             df_cnts_pasta = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnts_todas.empty else pd.DataFrame()
-            
-            set_contados_triade = set()
-            if not df_cnts_pasta.empty:
-                for _, r in df_cnts_pasta.iterrows():
-                    set_contados_triade.add(f"{str(r.get('cod_produto', '')).upper().strip()}_{str(r.get('lote', '')).upper().strip()}_{str(r.get('ativo', '')).upper().strip()}")
-
-            for r_ram in st.session_state.buffer_ram_contagens:
-                if str(r_ram['inventario_id']) == id_pasta_limpo_base:
-                    set_contados_triade.add(f"{str(r_ram['cod_produto']).upper().strip()}_{str(r_ram['lote']).upper().strip()}_{str(r_ram['ativo']).upper().strip()}")
 
             if str(inventario_selected_obj['status']) == "1a Contagem":
+                set_contados_triade = set()
+                if not df_cnts_pasta.empty:
+                    for _, r in df_cnts_pasta.iterrows():
+                        set_contados_triade.add(f"{str(r.get('cod_produto', '')).upper().strip()}_{str(r.get('lote', '')).upper().strip()}_{str(r.get('ativo', '')).upper().strip()}")
+
+                for r_ram in st.session_state.buffer_ram_contagens:
+                    if str(r_ram['inventario_id']) == id_pasta_limpo_base:
+                        set_contados_triade.add(f"{str(r_ram['cod_produto']).upper().strip()}_{str(r_ram['lote']).upper().strip()}_{str(r_ram['ativo']).upper().strip()}")
+
                 for _, r_b in base_sistema_atual.iterrows():
                     c_b = str(r_b.get('cod_produto', '')).upper().strip()
                     l_b = str(r_b.get('lote', '')).upper().strip() if pd.notna(r_b.get('lote')) and str(r_b.get('lote')).lower() != 'nan' else ""
                     a_b = str(r_b.get('ativo', '')).upper().strip() if pd.notna(r_b.get('ativo')) and str(r_b.get('ativo')).lower() != 'nan' else ""
                     if f"{c_b}_{l_b}_{a_b}" not in set_contados_triade: itens_faltantes.append(c_b)
                 if len(itens_faltantes) == 0: pode_fechar = True
+
             elif str(inventario_selected_obj['status']) == "2a Contagem":
+                # Verifica itens liberados para 2a contagem que ainda não possuem nova contagem registrada
+                bips_novos_2a = set()
+                for r_ram in st.session_state.buffer_ram_contagens:
+                    if str(r_ram['inventario_id']) == id_pasta_limpo_base and str(r_ram.get('fase_contagem')) in ['2a Contagem', '2a Contagem Concluida']:
+                        bips_novos_2a.add(str(r_ram['cod_produto']).upper().strip())
+
                 if not df_cnts_pasta.empty:
-                    itens_pendentes_2a = [str(r['cod_produto']).upper().strip() for _, r in df_cnts_pasta.iterrows() if str(r.get('fase_contagem')) == '2a Contagem']
+                    itens_liberados = df_cnts_pasta[df_cnts_pasta['fase_contagem'] == '2a Contagem']['cod_produto'].astype(str).str.upper().str.strip().tolist()
+                    itens_pendentes_2a = [cod for cod in itens_liberados if cod not in bips_novos_2a]
+                
                 if len(itens_pendentes_2a) == 0: pode_fechar = True
 
             st.markdown("---")
@@ -459,9 +468,10 @@ else:
                 
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
-                    df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'status'] = 'Fechado'
-                    df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'total_itens'] = tot
-                    df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'acuracidade_final'] = pct_acu
+                    id_limpo_str = str(id_inv).replace('#', '').strip()
+                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'status'] = 'Fechado'
+                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'total_itens'] = tot
+                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'acuracidade_final'] = pct_acu
                     atualizar_aba_completa("inventarios", df_inv_up)
                 limpar_cache_aplicacao()
 
@@ -533,20 +543,31 @@ else:
                     df_cnts_exist = ler_aba("contagens")
                     df_cnts_exist_pasta = df_cnts_exist[df_cnts_exist['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnts_exist.empty else pd.DataFrame()
                     
-                    set_ja_contados = set()
-                    if not df_cnts_exist_pasta.empty:
-                        for _, r in df_cnts_exist_pasta[df_cnts_exist_pasta['cod_produto'].astype(str).str.upper().str.strip() == codigo_rastreio].iterrows():
-                            # Se for 2a Contagem, permite re-bipar o item liberado
-                            if str(r.get('fase_contagem', '')) != '2a Contagem':
-                                set_ja_contados.add(f"{str(r.get('lote', '')).strip().upper()}_{str(r.get('ativo', '')).strip().upper()}")
-                    
-                    for r_ram in st.session_state.buffer_ram_contagens:
-                        if str(r_ram['cod_produto']).upper().strip() == codigo_rastreio:
-                            set_ja_contados.add(f"{str(r_ram['lote']).strip().upper()}_{str(r_ram['ativo']).strip().upper()}")
-
                     status_pasta_atual = str(inventario_selected_obj['status'])
 
-                    if status_pasta_atual == "1a Contagem":
+                    if status_pasta_atual == "2a Contagem":
+                        # Na 2a contagem, verifica se o código realmente está liberado na fase '2a Contagem'
+                        if not df_cnts_exist_pasta.empty:
+                            itens_liberados_2a = df_cnts_exist_pasta[df_cnts_exist_pasta['fase_contagem'] == '2a Contagem']['cod_produto'].astype(str).str.upper().str.strip().tolist()
+                            if codigo_rastreio not in itens_liberados_2a:
+                                st.warning(f"⚠️ O item {codigo_rastreio} já teve a 1ª contagem ok e NÃO está pendente de 2ª contagem.")
+                                pode_exibir_form = False
+                            else:
+                                matches_para_usar = matches_codigo
+                                pode_exibir_form = True
+                        else:
+                            matches_para_usar = matches_codigo
+                            pode_exibir_form = True
+                    else:
+                        set_ja_contados = set()
+                        if not df_cnts_exist_pasta.empty:
+                            for _, r in df_cnts_exist_pasta[df_cnts_exist_pasta['cod_produto'].astype(str).str.upper().str.strip() == codigo_rastreio].iterrows():
+                                set_ja_contados.add(f"{str(r.get('lote', '')).strip().upper()}_{str(r.get('ativo', '')).strip().upper()}")
+                        
+                        for r_ram in st.session_state.buffer_ram_contagens:
+                            if str(r_ram['cod_produto']).upper().strip() == codigo_rastreio:
+                                set_ja_contados.add(f"{str(r_ram['lote']).strip().upper()}_{str(r_ram['ativo']).strip().upper()}")
+
                         matches_pendentes = [row_m for _, row_m in matches_codigo.iterrows() if f"{str(row_m.get('lote', '')).strip().upper()}_{str(row_m.get('ativo', '')).strip().upper()}" not in set_ja_contados]
                         if not matches_pendentes:
                             st.success(f"🎉 **Todos os ativos/lotes do produto {codigo_rastreio} já foram contabilizados!**")
@@ -554,9 +575,6 @@ else:
                         else:
                             matches_para_usar = pd.DataFrame(matches_pendentes)
                             pode_exibir_form = True
-                    else:
-                        matches_para_usar = matches_codigo
-                        pode_exibir_form = True
 
                     if pode_exibir_form:
                         if len(matches_para_usar) > 1:
@@ -658,7 +676,7 @@ else:
                     a = str(row.get('ativo','')).upper().strip() if pd.notna(row.get('ativo')) and str(row.get('ativo')).lower()!='nan' else ""
                     key = f"{c}_{l}_{a}"
                     if key in mapa_contados: return f"🟩 Contabilizado por ({mapa_contados[key]})"
-                    return "スカ Não Contado"
+                    return "🟥 Não Contado"
                 
                 df_espelho = base_sistema_atual.copy()
                 df_espelho['Status de Contagem'] = df_espelho.apply(obter_status, axis=1)
@@ -848,14 +866,15 @@ else:
                                 df_cnts.loc[idx_sel, 'observacao'] = f"ADM ({st.session_state.operador}): [LIBERADO 2ª CONTAGEM] - {justificativa_adm.strip()}"
                                 atualizar_aba_completa("contagens", df_cnts.drop(columns=['diferenca_num']))
                                 
-                                # 2. REABRE A PASTA ASSOCIADA (muda status para '2a Contagem')
+                                # 2. REABRE A PASTA ASSOCIADA (Flexível para #1 e 1)
                                 id_pasta_target = str(row_target['inventario_id']).replace('#', '').strip()
                                 df_inv_all = ler_aba("inventarios")
                                 if not df_inv_all.empty:
-                                    df_inv_all.loc[df_inv_all['id'].astype(str).str.replace('#', '').str.strip() == id_pasta_target, 'status'] = '2a Contagem'
+                                    mascara_pasta = df_inv_all['id'].astype(str).str.replace('#', '').str.strip() == id_pasta_target
+                                    df_inv_all.loc[mascara_pasta, 'status'] = '2a Contagem'
                                     atualizar_aba_completa("inventarios", df_inv_all)
 
-                                # 3. Atualiza na memória RAM se estiver lá
+                                # 3. Atualiza no buffer RAM local se a pasta estiver retida lá
                                 for inv_r in st.session_state.buffer_ram_inventarios:
                                     if str(inv_r['id']).replace('#', '').strip() == id_pasta_target:
                                         inv_r['status'] = '2a Contagem'
