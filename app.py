@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets e padroniza as colunas."""
+    """Lê uma aba do Google Sheets sem perder registros."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -42,23 +42,30 @@ def ler_aba(nome_aba):
         return pd.DataFrame()
 
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Insere novos registros na aba mantendo a persistência."""
+    """Anexa novos dados ao final da aba SEM apagar o histórico existente."""
     try:
         sh = conectar_gspread()
-        if sh:
+        if sh and not novos_dados_df.empty:
             ws = sh.worksheet(nome_aba)
-            df_ex = ler_aba(nome_aba)
             
+            # Normaliza cabeçalhos
             novos_dados_df.columns = [str(c).strip().lower() for c in novos_dados_df.columns]
             
-            if not df_ex.empty:
-                df_final = pd.concat([df_ex, novos_dados_df], ignore_index=True)
-            else:
-                df_final = novos_dados_df
+            # Lê o cabeçalho existente da planilha para alinhar as colunas
+            df_existente = ler_aba(nome_aba)
             
-            df_final = df_final.astype(str)
-            ws.clear()
-            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            if not df_existente.empty:
+                # Mantém as colunas na mesma ordem e faz o merge seguro
+                df_final = pd.concat([df_existente, novos_dados_df], ignore_index=True)
+                df_final = df_final.astype(str)
+                ws.clear()
+                ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            else:
+                # Se a planilha estava zerada, insere com cabeçalho
+                df_final = novos_dados_df.astype(str)
+                ws.clear()
+                ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+                
             st.cache_data.clear()
             return True
         return False
@@ -67,10 +74,10 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba."""
+    """Substitui o conteúdo de uma aba apenas quando estritamente necessário."""
     try:
         sh = conectar_gspread()
-        if sh:
+        if sh and not df_completo.empty:
             ws = sh.worksheet(nome_aba)
             df_completo.columns = [str(c).strip().lower() for c in df_completo.columns]
             df_completo = df_completo.astype(str)
@@ -444,7 +451,6 @@ else:
                 if len(itens_faltantes) == 0: pode_fechar = True
 
             elif str(inventario_selected_obj['status']) == "2a Contagem":
-                # Verifica itens liberados para 2a contagem que ainda não possuem nova contagem registrada
                 bips_novos_2a = set()
                 for r_ram in st.session_state.buffer_ram_contagens:
                     if str(r_ram['inventario_id']) == id_pasta_limpo_base and str(r_ram.get('fase_contagem')) in ['2a Contagem', '2a Contagem Concluida']:
@@ -546,7 +552,6 @@ else:
                     status_pasta_atual = str(inventario_selected_obj['status'])
 
                     if status_pasta_atual == "2a Contagem":
-                        # Na 2a contagem, verifica se o código realmente está liberado na fase '2a Contagem'
                         if not df_cnts_exist_pasta.empty:
                             itens_liberados_2a = df_cnts_exist_pasta[df_cnts_exist_pasta['fase_contagem'] == '2a Contagem']['cod_produto'].astype(str).str.upper().str.strip().tolist()
                             if codigo_rastreio not in itens_liberados_2a:
@@ -861,12 +866,10 @@ else:
                         col_act1, col_act2 = st.columns(2)
                         with col_act1:
                             if st.button("🚨 Abrir 2ª Contagem", type="primary", use_container_width=True):
-                                # 1. Atualiza a fase do item para "2a Contagem"
                                 df_cnts.loc[idx_sel, 'fase_contagem'] = '2a Contagem'
                                 df_cnts.loc[idx_sel, 'observacao'] = f"ADM ({st.session_state.operador}): [LIBERADO 2ª CONTAGEM] - {justificativa_adm.strip()}"
                                 atualizar_aba_completa("contagens", df_cnts.drop(columns=['diferenca_num']))
                                 
-                                # 2. REABRE A PASTA ASSOCIADA (Flexível para #1 e 1)
                                 id_pasta_target = str(row_target['inventario_id']).replace('#', '').strip()
                                 df_inv_all = ler_aba("inventarios")
                                 if not df_inv_all.empty:
@@ -874,7 +877,6 @@ else:
                                     df_inv_all.loc[mascara_pasta, 'status'] = '2a Contagem'
                                     atualizar_aba_completa("inventarios", df_inv_all)
 
-                                # 3. Atualiza no buffer RAM local se a pasta estiver retida lá
                                 for inv_r in st.session_state.buffer_ram_inventarios:
                                     if str(inv_r['id']).replace('#', '').strip() == id_pasta_target:
                                         inv_r['status'] = '2a Contagem'
