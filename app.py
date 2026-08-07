@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets de forma bruta para evitar erros com campos nulos ou decimais."""
+    """Lê uma aba do Google Sheets sem armazenar em cache para garantir sincronia automática."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -44,7 +44,7 @@ def ler_aba(nome_aba):
         return pd.DataFrame()
 
 def anexar_linha_aba(nome_aba, novos_dados_df):
-    """Adiciona novas linhas ao final da aba no Google Sheets."""
+    """Adiciona novas linhas ao final da aba e invalida o cache automaticamente."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -60,6 +60,8 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
             df_final = df_final.astype(str)
             ws.clear()
             ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            
+            # AUTOMATIZAÇÃO DA ATUALIZAÇÃO DE DADOS
             st.cache_data.clear()
             return True
         return False
@@ -68,7 +70,7 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba mantendo a sincronia das colunas."""
+    """Substitui o conteúdo de uma aba e atualiza o estado da aplicação automaticamente."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -80,6 +82,8 @@ def atualizar_aba_completa(nome_aba, df_completo):
                 ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
             else:
                 ws.clear()
+            
+            # AUTOMATIZAÇÃO DA ATUALIZAÇÃO DE DADOS
             st.cache_data.clear()
             return True
         return False
@@ -122,7 +126,6 @@ def extrair_id_estoque_do_nome(nome_inventario):
     return ""
 
 def padronizar_id_estoque(valor):
-    """Converte valores como 1078.0 ou '1078' para a string '1078'."""
     val_str = str(valor).strip()
     if val_str.endswith(".0"):
         val_str = val_str[:-2]
@@ -249,7 +252,6 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
-    # ORDENAÇÃO DE INVENTÁRIOS: MAIS RECENTES NO TOPO
     df_inventarios = ler_aba("inventarios")
     if not df_inventarios.empty and 'id' in df_inventarios.columns:
         df_inventarios['id_clean'] = df_inventarios['id'].astype(str).str.replace('#', '', regex=False).str.strip()
@@ -257,7 +259,6 @@ else:
         df_inventarios = df_inventarios[df_inventarios['id_clean'] != ""]
         df_inventarios = df_inventarios.drop_duplicates(subset=['id_clean'], keep='last')
         
-        # Ordena prioritariamente por data (decrescente) e por número de ID (decrescente)
         df_inventarios['data_dt'] = pd.to_datetime(df_inventarios['data'], errors='coerce')
         df_inventarios = df_inventarios.sort_values(by=['data_dt', 'id_num'], ascending=[False, False])
     else:
@@ -269,7 +270,7 @@ else:
     # --- BARRA LATERAL ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.operador}** ({st.session_state.perfil_usuario})")
-        st.success("🟢 Sincronização direta com Google Sheets ativa.")
+        st.success("🟢 Sincronização automática com Google Sheets ativa.")
 
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -292,7 +293,6 @@ else:
             id_pasta_limpo_base = ""
             st.info("Crie um inventário abaixo.")
         else:
-            # O primeiro item da lista é o mais recente
             lista_inv = [f"{row['id']} – {row['nome']} ({row['status']})" for idx, row in df_inventarios.iterrows()]
             inventario_selected = st.selectbox("Selecione a Pasta", lista_inv, index=0, key="sb_pasta_ativa")
             id_inventario_atual = inventario_selected.split(" – ")[0]
@@ -343,7 +343,7 @@ else:
                     
                     df_nova_base_completa = pd.concat([df_base_existente, pd.DataFrame(novos_itens_base)], ignore_index=True)
                     atualizar_aba_completa("itens_base_inventario", df_nova_base_completa)
-                    st.toast("✅ Base Salva no Google Sheets com Sucesso!", icon="✅")
+                    st.toast("✅ Base Salva com Sucesso!", icon="✅")
                     st.rerun()
 
         # CARREGA BASE DO GOOGLE SHEETS
@@ -381,7 +381,7 @@ else:
                         "acuracidade_final": "0%"
                     }])
                     anexar_linha_aba("inventarios", df_novo_inv)
-                    st.toast(f"✅ Pasta {novo_id_str} registrada no Google Sheets!", icon="🎉")
+                    st.toast(f"✅ Pasta {novo_id_str} registrada!", icon="🎉")
                     time.sleep(0.3)
                     st.rerun()
 
@@ -431,7 +431,6 @@ else:
                     df_inv_up.loc[mascara, 'total_itens'] = tot
                     df_inv_up.loc[mascara, 'acuracidade_final'] = pct_acu
                     atualizar_aba_completa("inventarios", df_inv_up)
-                limpar_cache_aplicacao()
 
             if pode_fechar:
                 if st.button("🔒 Fechar Inventário (100% Concluído)", use_container_width=True, type="primary"):
@@ -450,7 +449,7 @@ else:
         # KPIs SIDEBAR
         total_itens_base = len(base_sistema_atual) if not base_sistema_atual.empty else 0
         df_cnt_cnt = ler_aba("contagens")
-        df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_cnt.empty else pd.DataFrame()
+        df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_pasta.empty else pd.DataFrame()
         total_contados_cnt = len(df_cnt_pasta)
         
         st.markdown(f'<div class="card-lateral"><div class="card-lateral-titulo">📋 ITENS NA BASE</div><div class="card-lateral-valor">{total_itens_base}</div></div>', unsafe_allow_html=True)
@@ -464,7 +463,7 @@ else:
     aba_contar, aba_lancamentos, aba_desempenho, aba_historico = abas_objs[0], abas_objs[1], abas_objs[2], abas_objs[3]
     aba_adm = abas_objs[4] if eh_supervisor else None
 
-    # --- ABA 1: CONTAR ITEM ---
+    # --- ABA 1: CONTAR ITEM (GRAVAÇÃO DIRETA NO SHEETS) ---
     with aba_contar:
         if not id_inventario_atual or base_sistema_atual.empty:
             st.warning("⚠️ Selecione um inventário ativo e carregue a base na barra lateral.")
@@ -568,7 +567,7 @@ else:
 
                                     anexar_linha_aba("contagens", df_novo_bip)
 
-                                    # ATUALIZA A ABA 'ultima_contagem_estoques' COM ID LIMPO
+                                    # ATUALIZA A ABA 'ultima_contagem_estoques'
                                     df_ultimas = ler_aba("ultima_contagem_estoques")
                                     id_est_padronizado = padronizar_id_estoque(id_est_limpo)
                                     
@@ -581,7 +580,7 @@ else:
                                     atualizar_aba_completa("ultima_contagem_estoques", df_ultimas)
 
                                     st.session_state.contador_reset += 1
-                                    st.toast("✅ Contagem salva no Google Sheets!", icon="💾")
+                                    st.toast("✅ Contagem salva com sucesso!", icon="💾")
                                     st.rerun()
 
     # --- ABA 2: LANÇAMENTOS E ESPELHO BASE ---
@@ -592,7 +591,6 @@ else:
             df_minhas = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnts_todas.empty else pd.DataFrame()
 
             if not df_minhas.empty:
-                # Ordena os lançamentos por data e hora mais recentes no topo
                 if 'data_hora' in df_minhas.columns:
                     df_minhas['dt_sort'] = pd.to_datetime(df_minhas['data_hora'], errors='coerce')
                     df_minhas = df_minhas.sort_values(by='dt_sort', ascending=False).drop(columns=['dt_sort'])
@@ -622,7 +620,7 @@ else:
                     a = str(row.get('ativo','')).upper().strip() if pd.notna(row.get('ativo')) and str(row.get('ativo')).lower()!='nan' else ""
                     key = f"{c}_{l}_{a}"
                     if key in mapa_contados: return f"🟩 Contabilizado por ({mapa_contados[key]})"
-                    return "独立 Não Contado"
+                    return "🟥 Não Contado"
                 
                 df_espelho = base_sistema_atual.copy()
                 df_espelho['Status de Contagem'] = df_espelho.apply(obter_status, axis=1)
@@ -675,7 +673,7 @@ else:
             k1, k2, k3 = st.columns(3)
             k1.metric("🟢 Em Dia (até 7 dias)", b_count)
             k2.metric("🟡 Necessário Auditar (8 a 14 dias)", a_count)
-            k3.metric("🔴 Crítico (+2 semanas)", c_count)
+            k3.metric("🔴 Crítico (+14 dias)", c_count)
             
             col_f_stat, col_f_busca = st.columns([1, 1])
             filtro_criticidade = col_f_stat.selectbox("🎯 Filtrar por Criticidade:", ["Todos os Estoques", "🟢 Em Dia", "🟡 Necessário Auditar", "🔴 Crítico (+2 semanas)"])
@@ -689,7 +687,6 @@ else:
 
             df_exibir['Dias Sem Contar'] = df_exibir['Dias Sem Contar'].apply(lambda x: "—" if x == 999 else x)
             
-            # ORDENAÇÃO DE ESTOQUES: MAIS RECENTES NO TOPO
             df_exibir['sort_dt'] = pd.to_datetime(df_exibir['Última Contagem'], format="%d/%m/%Y %H:%M", errors='coerce')
             df_exibir = df_exibir.sort_values(by=['sort_dt', 'Id. Estoque'], ascending=[False, True]).drop(columns=['sort_dt'])
             
@@ -728,13 +725,12 @@ else:
                             limpar_cache_aplicacao()
                             st.rerun()
 
-    # --- ABA 4: HISTÓRICO GERAL (LEITURA DIRETA E MAIS RECENTES NO TOPO) ---
+    # --- ABA 4: HISTÓRICO GERAL ---
     with aba_historico:
         st.title("📁 Arquivo Geral de Movimentações")
         if df_inventarios.empty or 'id' not in df_inventarios.columns: 
             st.info("Nenhum inventário registrado.")
         else:
-            # Força ordenação por data e ID mais recentes
             df_inv_ordenados = df_inventarios.copy()
             df_inv_ordenados['id_num'] = pd.to_numeric(df_inv_ordenados['id'].astype(str).str.replace('#', '', regex=False), errors='coerce').fillna(0)
             df_inv_ordenados['data_dt'] = pd.to_datetime(df_inv_ordenados['data'], errors='coerce')
@@ -756,7 +752,6 @@ else:
                 
                 df_h = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
                 
-                # Ordena bips dentro da pasta por data/hora mais recente
                 if not df_h.empty and 'data_hora' in df_h.columns:
                     df_h['dt_sort'] = pd.to_datetime(df_h['data_hora'], errors='coerce')
                     df_h = df_h.sort_values(by='dt_sort', ascending=False).drop(columns=['dt_sort'])
