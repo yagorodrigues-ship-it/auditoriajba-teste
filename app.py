@@ -4,22 +4,39 @@ import datetime
 import io
 import re
 import time
-from streamlit_gsheets import GSheetsConnection
+import gspread
+from google.oauth2.service_account import Credentials
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Auditoria & Inventário - JBA (TESTE DRIVE)", layout="wide")
 
-# --- CONEXÃO AUTENTICADA COM GOOGLE SHEETS VIA SERVICE ACCOUNT ---
-conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
+# --- CONEXÃO DIRETA E GARANTIDA COM GOOGLE SHEETS VIA SERVICE ACCOUNT ---
+@st.cache_resource
+def conectar_gspread():
+    try:
+        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        
+        # Pega as credenciais direto dos Secrets do Streamlit Cloud
+        info_dict = dict(st.secrets["connections"]["gsheets"])
+        creds = Credentials.from_service_account_info(info_dict, scopes=scope)
+        gc = gspread.authorize(creds)
+        
+        url_planilha = st.secrets["gconfigs"]["spreadsheet_url"]
+        return gc.open_by_url(url_planilha)
+    except Exception as e:
+        st.error(f"❌ Erro de Autenticação com o Google Sheets: {e}")
+        return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba da planilha do Google Drive usando Service Account."""
+    """Lê uma aba da planilha diretamente com gspread."""
     try:
-        df = conn_gsheets.read(worksheet=nome_aba, ttl=0)
-        if df is not None and not df.empty:
-            df = df.fillna("")
+        sh = conectar_gspread()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            dados = ws.get_all_records()
+            df = pd.DataFrame(dados).fillna("")
             df.columns = [str(c).strip().lower() for c in df.columns]
             return df
         return pd.DataFrame()
@@ -27,30 +44,40 @@ def ler_aba(nome_aba):
         return pd.DataFrame()
 
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Grava novos dados na planilha do Google Drive garantindo a inclusão das linhas."""
+    """Insere novos registros no final da aba do Google Sheets."""
     try:
-        df_ex = ler_aba(nome_aba)
-        if not df_ex.empty:
-            df_final = pd.concat([df_ex, novos_dados_df], ignore_index=True)
-        else:
-            df_final = novos_dados_df
-        
-        # Converte tudo para string para evitar erros de tipo no Google Sheets
-        df_final = df_final.astype(str)
-        conn_gsheets.update(worksheet=nome_aba, data=df_final)
-        st.cache_data.clear()
-        return True
+        sh = conectar_gspread()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            df_ex = ler_aba(nome_aba)
+            
+            if not df_ex.empty:
+                df_final = pd.concat([df_ex, novos_dados_df], ignore_index=True)
+            else:
+                df_final = novos_dados_df
+            
+            df_final = df_final.astype(str)
+            ws.clear()
+            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            st.cache_data.clear()
+            return True
+        return False
     except Exception as e:
         st.error(f"❌ Erro ao salvar na aba '{nome_aba}': {e}")
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui a aba inteira na planilha."""
+    """Substitui o conteúdo inteiro da aba."""
     try:
-        df_completo = df_completo.astype(str)
-        conn_gsheets.update(worksheet=nome_aba, data=df_completo)
-        st.cache_data.clear()
-        return True
+        sh = conectar_gspread()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            df_completo = df_completo.astype(str)
+            ws.clear()
+            ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
+            st.cache_data.clear()
+            return True
+        return False
     except Exception as e:
         st.error(f"❌ Erro ao atualizar aba '{nome_aba}': {e}")
         return False
@@ -193,7 +220,6 @@ def sincronizar_ram_com_banco():
     if tot_cnt > 0:
         df_cnts_ram = pd.DataFrame(st.session_state.buffer_ram_contagens)
         if salvar_lote_aba("contagens", df_cnts_ram):
-            # Atualiza última data dos estoques
             df_ultimas = ler_aba("ultima_contagem_estoques")
             novas_datas = []
             for item in st.session_state.buffer_ram_contagens:
@@ -423,15 +449,17 @@ else:
 
             st.markdown("---")
             def fechar_e_preservar_historico(id_inv, id_limpo):
-                # Força o envio antes de fechar
+                # 1. Força a gravação de tudo que está na RAM para o Drive primeiro
                 sincronizar_ram_com_banco()
                 
+                # 2. Recarrega as contagens gravadas para calcular a acuracidade exata
                 df_cnts = ler_aba("contagens")
                 df_f = df_cnts[df_cnts['inventario_id'].astype(str) == id_limpo] if not df_cnts.empty else pd.DataFrame()
                 tot = len(df_f)
                 acertos = len(df_f[pd.to_numeric(df_f['diferenca'], errors='coerce') == 0]) if tot > 0 else 0
                 pct_acu = f"{(acertos / tot)*100:.1f}%" if tot > 0 else "0%"
                 
+                # 3. Atualiza o registro no Google Sheets
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
                     df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'status'] = 'Fechado'
@@ -470,7 +498,7 @@ else:
                 if qtd > 0:
                     st.success(f"✅ {qtd} alterações enviadas para a planilha do Drive!")
                 else:
-                    st.error("❌ Falha na gravação. Verifique as credenciais nos Secrets.")
+                    st.error("❌ Falha na gravação. Verifique as permissões da planilha.")
             else:
                 st.info("ℹ️ Nenhuma alteração pendente em RAM.")
             st.rerun()
@@ -487,7 +515,7 @@ else:
     with aba_contar:
         if pendentes_totais > 0:
             c_top1, c_top2 = st.columns([3, 1])
-            c_top1.info(f"⚡ **Modo Ultra Rápido Ativo:** Você tem **{pendentes_totais} bips** guardados na RAM local.")
+            c_top1.info(f"⚡ **Modo Ultra Rápido Ativo:** Você tem **{pendentes_totais} bips/dados** guardados na RAM local.")
             with c_top2:
                 df_ram_temp = pd.DataFrame(st.session_state.buffer_ram_contagens)
                 st.download_button("📥 Backup RAM (.xlsx)", converter_para_excel(df_ram_temp), file_name=f"backup_ram_pasta_{id_pasta_limpo_base}.xlsx")
@@ -750,8 +778,14 @@ else:
             for idx, inv in fatia_pastas.iterrows():
                 id_proc = str(inv['id']).replace('#','').strip()
                 df_cnts_todas = ler_aba("contagens")
-                df_h = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
-                tot_reg = len(df_h) if not df_h.empty else inv.get('total_itens', 0)
+                
+                # Junta lançamentos salvos no Drive + lançamentos pendentes em RAM
+                df_h_drive = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
+                df_h_ram = pd.DataFrame([c for c in st.session_state.buffer_ram_contagens if str(c['inventario_id']) == id_proc])
+                
+                df_h = pd.concat([df_h_ram, df_h_drive], ignore_index=True)
+                
+                tot_reg = len(df_h)
                 acu_reg = inv.get('acuracidade_final', '—')
 
                 c_exp, c_del = st.columns([8, 2])
