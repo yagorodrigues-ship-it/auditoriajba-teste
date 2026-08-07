@@ -10,9 +10,9 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Auditoria & Inventário - JBA (TESTE DRIVE)", layout="wide")
+st.set_page_config(page_title="Auditoria & Inventário - JBA (Google Sheets Direto)", layout="wide")
 
-# --- CONEXÃO COM O GOOGLE SHEETS VIA SERVICE ACCOUNT ---
+# --- CONEXÃO DIRETA COM O GOOGLE SHEETS VIA SERVICE ACCOUNT ---
 @st.cache_resource
 def conectar_gspread():
     try:
@@ -41,39 +41,8 @@ def ler_aba(nome_aba):
     except Exception:
         return pd.DataFrame()
 
-def sincronizar_upsert_inventarios(df_novos_inv):
-    """Atualiza o registro do inventário na planilha pelo ID sem duplicar linhas."""
-    try:
-        sh = conectar_gspread()
-        if sh and not df_novos_inv.empty:
-            ws = sh.worksheet("inventarios")
-            df_existente = ler_aba("inventarios")
-            
-            df_novos_inv['id_clean'] = df_novos_inv['id'].astype(str).str.replace('#', '', regex=False).str.strip()
-            
-            if not df_existente.empty:
-                df_existente['id_clean'] = df_existente['id'].astype(str).str.replace('#', '', regex=False).str.strip()
-                ids_novos = df_novos_inv['id_clean'].tolist()
-                df_mantidos = df_existente[~df_existente['id_clean'].isin(ids_novos)]
-                df_final = pd.concat([df_mantidos, df_novos_inv], ignore_index=True)
-            else:
-                df_final = df_novos_inv
-
-            if 'id_clean' in df_final.columns:
-                df_final = df_final.drop(columns=['id_clean'])
-                
-            df_final = df_final.astype(str)
-            ws.clear()
-            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-            st.cache_data.clear()
-            return True
-        return False
-    except Exception as e:
-        st.error(f"❌ Erro ao sincronizar inventários: {e}")
-        return False
-
-def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Adiciona os registros ao final da aba mantendo o histórico existente."""
+def anexar_linha_aba(nome_aba, novos_dados_df):
+    """Adiciona novas linhas ao final da aba no Google Sheets em tempo real."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -97,7 +66,7 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba garantindo a limpeza das linhas antigas."""
+    """Substitui o conteúdo de uma aba mantendo a sincronia."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -225,7 +194,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- INICIALIZAÇÃO DE ESTADOS EM MEMÓRIA RAM ---
+# --- INICIALIZAÇÃO DE ESTADOS EM SESSÃO ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'operador' not in st.session_state: st.session_state.operador = ""
 if 'perfil_usuario' not in st.session_state: st.session_state.perfil_usuario = "Almoxarife"
@@ -234,48 +203,6 @@ if 'contador_reset' not in st.session_state: st.session_state.contador_reset = 0
 if 'contador_reset_sup' not in st.session_state: st.session_state.contador_reset_sup = 0
 if 'bases_supervisor_por_inv' not in st.session_state: st.session_state.bases_supervisor_por_inv = {}
 if 'pagina_historico' not in st.session_state: st.session_state.pagina_historico = 1
-
-if 'buffer_ram_inventarios' not in st.session_state: st.session_state.buffer_ram_inventarios = []
-if 'buffer_ram_contagens' not in st.session_state: st.session_state.buffer_ram_contagens = []
-if 'buffer_ram_bases' not in st.session_state: st.session_state.buffer_ram_bases = []
-
-def sincronizar_ram_com_banco():
-    tot_inv = len(st.session_state.buffer_ram_inventarios)
-    tot_cnt = len(st.session_state.buffer_ram_contagens)
-    tot_bas = len(st.session_state.buffer_ram_bases)
-    
-    sucesso_total = True
-    
-    if tot_inv > 0:
-        if sincronizar_upsert_inventarios(pd.DataFrame(st.session_state.buffer_ram_inventarios)):
-            st.session_state.buffer_ram_inventarios = []
-        else: sucesso_total = False
-        
-    if tot_cnt > 0:
-        df_cnts_ram = pd.DataFrame(st.session_state.buffer_ram_contagens)
-        if salvar_lote_aba("contagens", df_cnts_ram):
-            df_ultimas = ler_aba("ultima_contagem_estoques")
-            novas_datas = []
-            for item in st.session_state.buffer_ram_contagens:
-                if item.get('id_estoque'):
-                    novas_datas.append({'id_estoque': str(item['id_estoque']), 'ultima_data': str(item['data_hora'])})
-            if novas_datas:
-                df_novas_dt = pd.DataFrame(novas_datas)
-                if not df_ultimas.empty:
-                    df_ultimas = pd.concat([df_ultimas, df_novas_dt], ignore_index=True).drop_duplicates(subset=['id_estoque'], keep='last')
-                else:
-                    df_ultimas = df_novas_dt
-                atualizar_aba_completa("ultima_contagem_estoques", df_ultimas)
-            st.session_state.buffer_ram_contagens = []
-        else: sucesso_total = False
-
-    if tot_bas > 0:
-        if salvar_lote_aba("itens_base_inventario", pd.DataFrame(st.session_state.buffer_ram_bases)):
-            st.session_state.buffer_ram_bases = []
-        else: sucesso_total = False
-
-    limpar_cache_aplicacao()
-    return (tot_inv + tot_cnt + tot_bas) if sucesso_total else 0
 
 # --- TELA DE LOGIN CENTRALIZADA ---
 if not st.session_state.logged_in:
@@ -313,23 +240,15 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
-    df_inv_drive = ler_aba("inventarios")
-    if not df_inv_drive.empty and 'id' in df_inv_drive.columns:
-        df_inv_drive['id_clean'] = df_inv_drive['id'].astype(str).str.replace('#', '', regex=False).str.strip()
-        df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id_clean'], errors='coerce').fillna(0)
-        df_inv_drive = df_inv_drive.drop_duplicates(subset=['id_clean'], keep='last')
-    else:
-        df_inv_drive = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
-
-    if st.session_state.buffer_ram_inventarios:
-        df_inv_ram = pd.DataFrame(st.session_state.buffer_ram_inventarios)
-        df_inv_ram['id_clean'] = df_inv_ram['id'].astype(str).str.replace('#', '', regex=False).str.strip()
-        df_inventarios = pd.concat([df_inv_ram, df_inv_drive], ignore_index=True).drop_duplicates(subset=['id_clean'], keep='first')
-    else:
-        df_inventarios = df_inv_drive.copy()
-
-    if not df_inventarios.empty and 'id_num' in df_inventarios.columns:
+    # LÊ INVENTÁRIOS DIRETO DO GOOGLE SHEETS
+    df_inventarios = ler_aba("inventarios")
+    if not df_inventarios.empty and 'id' in df_inventarios.columns:
+        df_inventarios['id_clean'] = df_inventarios['id'].astype(str).str.replace('#', '', regex=False).str.strip()
+        df_inventarios['id_num'] = pd.to_numeric(df_inventarios['id_clean'], errors='coerce').fillna(0)
+        df_inventarios = df_inventarios.drop_duplicates(subset=['id_clean'], keep='last')
         df_inventarios = df_inventarios.sort_values(by=['data', 'id_num'], ascending=[False, False])
+    else:
+        df_inventarios = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
 
     df_inventarios_sup = ler_aba("inventarios_supervisor")
     eh_supervisor = (st.session_state.perfil_usuario == "Administrador") or ("admin" in st.session_state.operador.lower())
@@ -337,12 +256,7 @@ else:
     # --- BARRA LATERAL ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.operador}** ({st.session_state.perfil_usuario})")
-        
-        pendentes_totais = len(st.session_state.buffer_ram_inventarios) + len(st.session_state.buffer_ram_contagens) + len(st.session_state.buffer_ram_bases)
-        if pendentes_totais > 0:
-            st.warning(f"⚡ **{pendentes_totais} alterações** guardadas na RAM local!")
-        else:
-            st.success("🟢 Memória RAM sincronizada com Drive.")
+        st.success("🟢 Conectado ao Google Sheets em tempo real.")
 
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -351,7 +265,6 @@ else:
                 st.rerun()
         with col_s2:
             if st.button("🚪 Sair", use_container_width=True):
-                sincronizar_ram_com_banco()
                 st.session_state.logged_in = False
                 st.session_state.operador = ""
                 limpar_cache_aplicacao()
@@ -372,7 +285,7 @@ else:
             inventario_selected_obj = df_inventarios[df_inventarios['id'].astype(str) == id_inventario_atual].iloc[0]
             id_pasta_limpo_base = str(id_inventario_atual).replace("#", "").strip()
 
-        # UPLOAD DA BASE
+        # UPLOAD DA BASE DIRETO NA NUVEM
         st.write("📂 **Upload Base de Dados (.xlsx)**")
         if inventario_selected_obj is not None and str(inventario_selected_obj['status']) == "Aberto":
             uploader_key = f"func_excel_loader_{id_pasta_limpo_base}_{st.session_state.contador_reset}"
@@ -393,9 +306,9 @@ else:
                 if not col_cod or not col_desc:
                     st.error("❌ Planilha fora do padrão JBA.")
                 else:
-                    st.session_state.buffer_ram_bases = [b for b in st.session_state.buffer_ram_bases if str(b['inventario_id']) != id_pasta_limpo_base]
+                    novos_itens_base = []
                     for _, r in df_upload_temp.iterrows():
-                        st.session_state.buffer_ram_bases.append({
+                        novos_itens_base.append({
                             "inventario_id": id_pasta_limpo_base,
                             "cod_produto": str(r[col_cod]).strip() if col_cod and pd.notna(r[col_cod]) else '',
                             "desc_produto": str(r[col_desc]).strip() if col_desc and pd.notna(r[col_desc]) else '',
@@ -406,39 +319,33 @@ else:
                             "lote": str(r[col_lote]).strip() if col_lote and pd.notna(r[col_lote]) and str(r[col_lote]).lower() != 'nan' else '',
                             "ativo": str(r[col_ativo]).strip() if col_ativo and pd.notna(r[col_ativo]) and str(r[col_ativo]).lower() != 'nan' else ''
                         })
-                    st.toast("✅ Base Carregada com sucesso em RAM!", icon="✅")
+                    
+                    df_base_existente = ler_aba("itens_base_inventario")
+                    if not df_base_existente.empty:
+                        df_base_existente = df_base_existente[df_base_existente['inventario_id'].astype(str) != id_pasta_limpo_base]
+                    
+                    df_nova_base_completa = pd.concat([df_base_existente, pd.DataFrame(novos_itens_base)], ignore_index=True)
+                    atualizar_aba_completa("itens_base_inventario", df_nova_base_completa)
+                    st.toast("✅ Base Salva no Google Sheets com Sucesso!", icon="✅")
+                    st.rerun()
 
-        # CARREGA BASE ATIVA (COMBINADA DRIVE + RAM)
+        # CARREGA BASE DO GOOGLE SHEETS
         df_base_drive = ler_aba("itens_base_inventario")
         if not df_base_drive.empty and 'inventario_id' in df_base_drive.columns:
-            df_base_drive = df_base_drive[df_base_drive['inventario_id'].astype(str) == id_pasta_limpo_base]
+            base_sistema_atual = df_base_drive[df_base_drive['inventario_id'].astype(str) == id_pasta_limpo_base]
         else:
-            df_base_drive = pd.DataFrame()
-
-        if st.session_state.buffer_ram_bases:
-            df_base_ram = pd.DataFrame([b for b in st.session_state.buffer_ram_bases if str(b['inventario_id']) == id_pasta_limpo_base])
-            base_sistema_atual = pd.concat([df_base_ram, df_base_drive], ignore_index=True)
-        else:
-            base_sistema_atual = df_base_drive.copy()
+            base_sistema_atual = pd.DataFrame()
 
         if inventario_selected_obj is not None and str(inventario_selected_obj['status']) == "Aberto" and not base_sistema_atual.empty:
             st.markdown("---")
-            if st.button("🚀 Salvar Base e Iniciar 1ª Contagem", type="primary", use_container_width=True):
-                for inv in st.session_state.buffer_ram_inventarios:
-                    if str(inv['id']) == str(id_inventario_atual):
-                        inv['status'] = '1a Contagem'
-
-                df_inv_drive = ler_aba("inventarios")
-                if not df_inv_drive.empty:
-                    df_inv_drive.loc[df_inv_drive['id'].astype(str) == str(id_inventario_atual), 'status'] = '1a Contagem'
-                    sincronizar_upsert_inventarios(df_inv_drive)
-
-                sincronizar_ram_com_banco()
-                limpar_cache_aplicacao()
+            if st.button("🚀 Iniciar 1ª Contagem", type="primary", use_container_width=True):
+                mascara = df_inventarios['id_clean'] == id_pasta_limpo_base
+                df_inventarios.loc[mascara, 'status'] = '1a Contagem'
+                atualizar_aba_completa("inventarios", df_inventarios.drop(columns=['id_clean', 'id_num'], errors='ignore'))
                 st.success("🔒 1ª Contagem liberada.")
                 st.rerun()
 
-        # CRIAÇÃO DE NOVO INVENTÁRIO
+        # CRIAÇÃO DE NOVO INVENTÁRIO (SALVA DIRETO NO SHEETS)
         with st.expander("➕ Criar Novo Inventário"):
             nome_nova_pasta = st.text_input("Nome do Inventário", key="txt_novo_nome_pasta")
             if st.button("Criar Pasta Agora", type="primary", use_container_width=True):
@@ -448,15 +355,16 @@ else:
                     maior_id = len(df_inventarios) + 1
                     novo_id_str = f"#{maior_id}"
 
-                    st.session_state.buffer_ram_inventarios.insert(0, {
+                    df_novo_inv = pd.DataFrame([{
                         "id": novo_id_str,
                         "nome": nome_nova_pasta.strip(),
                         "data": datetime.date.today().strftime("%Y-%m-%d"),
                         "status": "Aberto",
                         "total_itens": 0,
                         "acuracidade_final": "0%"
-                    })
-                    st.toast(f"✅ Pasta {novo_id_str} criada na memória local!", icon="🎉")
+                    }])
+                    anexar_linha_aba("inventarios", df_novo_inv)
+                    st.toast(f"✅ Pasta {novo_id_str} criada e salva no Google Sheets!", icon="🎉")
                     time.sleep(0.3)
                     st.rerun()
 
@@ -472,10 +380,6 @@ else:
                     for _, r in df_cnts_pasta.iterrows():
                         set_contados_triade.add(f"{str(r.get('cod_produto', '')).upper().strip()}_{str(r.get('lote', '')).upper().strip()}_{str(r.get('ativo', '')).upper().strip()}")
 
-                for r_ram in st.session_state.buffer_ram_contagens:
-                    if str(r_ram['inventario_id']) == id_pasta_limpo_base:
-                        set_contados_triade.add(f"{str(r_ram['cod_produto']).upper().strip()}_{str(r_ram['lote']).upper().strip()}_{str(r_ram['ativo']).upper().strip()}")
-
                 for _, r_b in base_sistema_atual.iterrows():
                     c_b = str(r_b.get('cod_produto', '')).upper().strip()
                     l_b = str(r_b.get('lote', '')).upper().strip() if pd.notna(r_b.get('lote')) and str(r_b.get('lote')).lower() != 'nan' else ""
@@ -485,20 +389,18 @@ else:
 
             elif str(inventario_selected_obj['status']) == "2a Contagem":
                 bips_novos_2a = set()
-                for r_ram in st.session_state.buffer_ram_contagens:
-                    if str(r_ram['inventario_id']) == id_pasta_limpo_base and str(r_ram.get('fase_contagem')) in ['2a Contagem', '2a Contagem Concluida']:
-                        bips_novos_2a.add(str(r_ram['cod_produto']).upper().strip())
-
                 if not df_cnts_pasta.empty:
+                    for _, r in df_cnts_pasta.iterrows():
+                        if str(r.get('fase_contagem')) in ['2a Contagem Concluida', '2a Contagem']:
+                            bips_novos_2a.add(str(r['cod_produto']).upper().strip())
+
                     itens_liberados = df_cnts_pasta[df_cnts_pasta['fase_contagem'] == '2a Contagem']['cod_produto'].astype(str).str.upper().str.strip().tolist()
                     itens_pendentes_2a = [cod for cod in itens_liberados if cod not in bips_novos_2a]
                 
                 if len(itens_pendentes_2a) == 0: pode_fechar = True
 
             st.markdown("---")
-            def fechar_e_preservar_historico(id_inv, id_limpo):
-                sincronizar_ram_com_banco()
-                
+            def fechar_e_preservar_historico(id_limpo):
                 df_cnts = ler_aba("contagens")
                 df_f = df_cnts[df_cnts['inventario_id'].astype(str) == id_limpo] if not df_cnts.empty else pd.DataFrame()
                 tot = len(df_f)
@@ -507,17 +409,16 @@ else:
                 
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
-                    id_limpo_str = str(id_inv).replace('#', '').strip()
-                    mascara = df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str
+                    mascara = df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo
                     df_inv_up.loc[mascara, 'status'] = 'Fechado'
                     df_inv_up.loc[mascara, 'total_itens'] = tot
                     df_inv_up.loc[mascara, 'acuracidade_final'] = pct_acu
-                    sincronizar_upsert_inventarios(df_inv_up)
+                    atualizar_aba_completa("inventarios", df_inv_up)
                 limpar_cache_aplicacao()
 
             if pode_fechar:
                 if st.button("🔒 Fechar Inventário (100% Concluído)", use_container_width=True, type="primary"):
-                    fechar_e_preservar_historico(id_inventario_atual, id_pasta_limpo_base)
+                    fechar_e_preservar_historico(id_pasta_limpo_base)
                     st.success("✅ Inventário encerrado e arquivado!")
                     st.rerun()
             else:
@@ -525,7 +426,7 @@ else:
                 st.warning(f"⏳ Faltam **{qtd_f}** itens para concluir.")
                 if eh_supervisor:
                     if st.button("🚨 Forçar Fechamento Incompleto (ADMIN)", use_container_width=True):
-                        fechar_e_preservar_historico(id_inventario_atual, id_pasta_limpo_base)
+                        fechar_e_preservar_historico(id_pasta_limpo_base)
                         st.success("✅ Inventário encerrado!")
                         st.rerun()
 
@@ -533,40 +434,21 @@ else:
         total_itens_base = len(base_sistema_atual) if not base_sistema_atual.empty else 0
         df_cnt_cnt = ler_aba("contagens")
         df_cnt_pasta = df_cnt_cnt[df_cnt_cnt['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnt_cnt.empty else pd.DataFrame()
-        total_contados_cnt = len(df_cnt_pasta) + len([c for c in st.session_state.buffer_ram_contagens if str(c['inventario_id']) == id_pasta_limpo_base])
+        total_contados_cnt = len(df_cnt_pasta)
         
         st.markdown(f'<div class="card-lateral"><div class="card-lateral-titulo">📋 ITENS NA BASE</div><div class="card-lateral-valor">{total_itens_base}</div></div>', unsafe_allow_html=True)
         st.markdown(f'<div class="card-lateral"><div class="card-lateral-titulo">✅ LANÇAMENTOS</div><div class="card-lateral-valor">{total_contados_cnt}</div></div>', unsafe_allow_html=True)
 
-        st.markdown("---")
-        if st.button("🚀 Sincronizar Agora com o Drive", type="primary", use_container_width=True):
-            if pendentes_totais > 0:
-                qtd = sincronizar_ram_com_banco()
-                if qtd > 0:
-                    st.success(f"✅ {qtd} alterações enviadas para a planilha do Drive!")
-                else:
-                    st.error("❌ Falha na gravação. Verifique as permissões da planilha.")
-            else:
-                st.info("ℹ️ Nenhuma alteração pendente em RAM.")
-            st.rerun()
-
     # --- DECLARAÇÃO DAS ABAS PRINCIPAIS ---
-    lista_abas = ["🔍 Contar Item (RAM Modo Rápido)", "📊 Lançamentos & Base", "📈 Desempenho & Acuracidade", "📁 Histórico Geral"]
+    lista_abas = ["🔍 Contar Item", "📊 Lançamentos & Base", "📈 Desempenho & Acuracidade", "📁 Histórico Geral"]
     if eh_supervisor: lista_abas.append("⚙️ Gestão ADM")
     
     abas_objs = st.tabs(lista_abas)
     aba_contar, aba_lancamentos, aba_desempenho, aba_historico = abas_objs[0], abas_objs[1], abas_objs[2], abas_objs[3]
     aba_adm = abas_objs[4] if eh_supervisor else None
 
-    # --- ABA 1: CONTAR ITEM (RAM MODO RÁPIDO) ---
+    # --- ABA 1: CONTAR ITEM (GRAVAÇÃO DIRETA NO SHEETS) ---
     with aba_contar:
-        if pendentes_totais > 0:
-            c_top1, c_top2 = st.columns([3, 1])
-            c_top1.info(f"⚡ **Modo Ultra Rápido Ativo:** Você tem **{pendentes_totais} bips/dados** guardados na RAM local.")
-            with c_top2:
-                df_ram_temp = pd.DataFrame(st.session_state.buffer_ram_contagens)
-                st.download_button("📥 Backup RAM (.xlsx)", converter_para_excel(df_ram_temp), file_name=f"backup_ram_pasta_{id_pasta_limpo_base}.xlsx")
-
         if not id_inventario_atual or base_sistema_atual.empty:
             st.warning("⚠️ Selecione um inventário ativo e carregue a base na barra lateral.")
         elif str(inventario_selected_obj['status']) == "Aberto": st.warning("⚠️ Inventário em configuração. Libere a 1ª Contagem na barra lateral.")
@@ -602,10 +484,6 @@ else:
                         if not df_cnts_exist_pasta.empty:
                             for _, r in df_cnts_exist_pasta[df_cnts_exist_pasta['cod_produto'].astype(str).str.upper().str.strip() == codigo_rastreio].iterrows():
                                 set_ja_contados.add(f"{str(r.get('lote', '')).strip().upper()}_{str(r.get('ativo', '')).strip().upper()}")
-                        
-                        for r_ram in st.session_state.buffer_ram_contagens:
-                            if str(r_ram['cod_produto']).upper().strip() == codigo_rastreio:
-                                set_ja_contados.add(f"{str(r_ram['lote']).strip().upper()}_{str(r_ram['ativo']).strip().upper()}")
 
                         matches_pendentes = [row_m for _, row_m in matches_codigo.iterrows() if f"{str(row_m.get('lote', '')).strip().upper()}_{str(row_m.get('ativo', '')).strip().upper()}" not in set_ja_contados]
                         if not matches_pendentes:
@@ -641,7 +519,7 @@ else:
                             confirma_zero = st.checkbox("⚠️ Marque se este item REALMENTE NÃO EXISTE no estoque (Saldo Zero)")
                             obs = st.text_input("Observação (opcional)")
                             
-                            if st.form_submit_button("⚡ Salvar na RAM (Instantâneo)", type="primary", use_container_width=True):
+                            if st.form_submit_button("💾 Salvar Contagem (Direto no Google Sheets)", type="primary", use_container_width=True):
                                 if qtd_fisica == 0 and not confirma_zero: st.error("⚠️ Para salvar quantidade 0, marque a confirmação amarela!")
                                 else:
                                     qtd_sys = int(pd.to_numeric(item.get('qtd_estoque', 0), errors='coerce') or 0)
@@ -649,7 +527,7 @@ else:
                                     fase_gravar = "2a Contagem Concluida" if status_pasta_atual == "2a Contagem" else status_pasta_atual
                                     data_hora_agora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                                    st.session_state.buffer_ram_contagens.append({
+                                    df_novo_bip = pd.DataFrame([{
                                         'inventario_id': id_pasta_limpo_base,
                                         'id_estoque': id_est_limpo,
                                         'desc_estoque': desc_est_limpo,
@@ -665,10 +543,21 @@ else:
                                         'data_hora': data_hora_agora,
                                         'lote': lote_auto,
                                         'fase_contagem': fase_gravar
-                                    })
+                                    }])
+
+                                    anexar_linha_aba("contagens", df_novo_bip)
+
+                                    # Atualiza última contagem do estoque
+                                    df_ultimas = ler_aba("ultima_contagem_estoques")
+                                    df_nova_dt = pd.DataFrame([{'id_estoque': id_est_limpo, 'ultima_data': data_hora_agora}])
+                                    if not df_ultimas.empty:
+                                        df_ultimas = pd.concat([df_ultimas, df_nova_dt], ignore_index=True).drop_duplicates(subset=['id_estoque'], keep='last')
+                                    else:
+                                        df_ultimas = df_nova_dt
+                                    atualizar_aba_completa("ultima_contagem_estoques", df_ultimas)
 
                                     st.session_state.contador_reset += 1
-                                    st.toast("⚡ Salvo na RAM instantaneamente!", icon="✅")
+                                    st.toast("✅ Contagem salva no Google Sheets!", icon="💾")
                                     st.rerun()
 
     # --- ABA 2: LANÇAMENTOS E ESPELHO BASE ---
@@ -677,12 +566,6 @@ else:
         with sub_aba1:
             df_cnts_todas = ler_aba("contagens")
             df_minhas = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnts_todas.empty else pd.DataFrame()
-            
-            if st.session_state.buffer_ram_contagens:
-                df_ram = pd.DataFrame(st.session_state.buffer_ram_contagens)
-                df_ram_pasta = df_ram[df_ram['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_ram.empty else pd.DataFrame()
-                if not df_ram_pasta.empty:
-                    df_minhas = pd.concat([df_ram_pasta, df_minhas], ignore_index=True)
 
             if not df_minhas.empty:
                 m1, m2, m3 = st.columns(3)
@@ -703,11 +586,6 @@ else:
                     for _, r in df_cnts_p.iterrows():
                         key = f"{str(r.get('cod_produto','')).upper().strip()}_{str(r.get('lote','')).upper().strip()}_{str(r.get('ativo','')).upper().strip()}"
                         mapa_contados[key] = str(r.get('operador', 'Operador'))
-                
-                for r_ram in st.session_state.buffer_ram_contagens:
-                    if str(r_ram['inventario_id']) == id_pasta_limpo_base:
-                        key = f"{str(r_ram['cod_produto']).upper().strip()}_{str(r_ram['lote']).upper().strip()}_{str(r_ram['ativo']).upper().strip()}"
-                        mapa_contados[key] = r_ram['operador']
 
                 def obter_status(row):
                     c = str(row.get('cod_produto','')).upper().strip()
@@ -811,7 +689,7 @@ else:
                             limpar_cache_aplicacao()
                             st.rerun()
 
-    # --- ABA 4: HISTÓRICO GERAL ---
+    # --- ABA 4: HISTÓRICO GERAL (LEITURA DIRETA DO SHEETS) ---
     with aba_historico:
         st.title("📁 Arquivo Geral de Movimentações")
         if df_inventarios.empty or 'id' not in df_inventarios.columns: 
@@ -835,11 +713,7 @@ else:
                 id_proc = str(inv['id']).replace('#','').strip()
                 df_cnts_todas = ler_aba("contagens")
                 
-                df_h_drive = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
-                df_h_ram = pd.DataFrame([c for c in st.session_state.buffer_ram_contagens if str(c['inventario_id']) == id_proc])
-                
-                df_h = pd.concat([df_h_ram, df_h_drive], ignore_index=True)
-                
+                df_h = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
                 tot_reg = len(df_h)
                 acu_reg = inv.get('acuracidade_final', '—')
 
@@ -852,10 +726,8 @@ else:
                         else: st.info("Nenhum lançamento registrado nesta pasta.")
                 with c_del:
                     if eh_supervisor and st.button("🗑️ Excluir Pasta", key=f"del_hist_inv_{inv['id']}", use_container_width=True):
-                        st.session_state.buffer_ram_inventarios = [i for i in st.session_state.buffer_ram_inventarios if str(i['id']) != str(inv['id'])]
-                        if not df_inv_drive.empty:
-                            df_inv_drive_att = df_inv_drive[df_inv_drive['id'].astype(str) != str(inv['id'])]
-                            atualizar_aba_completa("inventarios", df_inv_drive_att)
+                        df_inv_drive_att = df_inventarios[df_inventarios['id'].astype(str) != str(inv['id'])]
+                        atualizar_aba_completa("inventarios", df_inv_drive_att.drop(columns=['id_clean', 'id_num'], errors='ignore'))
                         limpar_cache_aplicacao()
                         st.rerun()
 
@@ -909,11 +781,7 @@ else:
                                 if not df_inv_all.empty:
                                     mascara_pasta = df_inv_all['id'].astype(str).str.replace('#', '').str.strip() == id_pasta_target
                                     df_inv_all.loc[mascara_pasta, 'status'] = '2a Contagem'
-                                    sincronizar_upsert_inventarios(df_inv_all)
-
-                                for inv_r in st.session_state.buffer_ram_inventarios:
-                                    if str(inv_r['id']).replace('#', '').strip() == id_pasta_target:
-                                        inv_r['status'] = '2a Contagem'
+                                    atualizar_aba_completa("inventarios", df_inv_all)
 
                                 st.success("✅ Item liberado e Pasta Reaberta para 2ª Contagem!")
                                 st.rerun()
@@ -954,7 +822,7 @@ else:
                                 "data": datetime.date.today().strftime("%Y-%m-%d"),
                                 "status": "Aberto"
                             }])
-                            salvar_lote_aba("inventarios_supervisor", df_novo_sup)
+                            anexar_linha_aba("inventarios_supervisor", df_novo_sup)
                             limpar_cache_aplicacao()
                             st.rerun()
 
@@ -1023,7 +891,7 @@ else:
                                         "recontagem_3": "Não",
                                         "ativo": at_sup.strip().upper()
                                     }])
-                                    salvar_lote_aba("auditorias_supervisor", df_nova_aud)
+                                    anexar_linha_aba("auditorias_supervisor", df_nova_aud)
                                     limpar_cache_aplicacao()
                                     st.success("✅ Auditoria registrada!")
                                     st.session_state.contador_reset_sup += 1
