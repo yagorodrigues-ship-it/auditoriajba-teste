@@ -27,22 +27,24 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets padronizando os cabeçalhos."""
+    """Lê uma aba do Google Sheets de forma bruta para evitar erros com campos nulos ou decimais."""
     try:
         sh = conectar_gspread()
         if sh:
             ws = sh.worksheet(nome_aba)
-            dados = ws.get_all_records()
-            if dados:
-                df = pd.DataFrame(dados).fillna("")
-                df.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in df.columns]
+            valores = ws.get_all_values()
+            if valores and len(valores) > 1:
+                headers = [str(c).replace('\xa0', ' ').strip().lower() for c in valores[0]]
+                df = pd.DataFrame(valores[1:], columns=headers).fillna("")
+                for col in df.columns:
+                    df[col] = df[col].astype(str).str.strip()
                 return df
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
 def anexar_linha_aba(nome_aba, novos_dados_df):
-    """Adiciona novas linhas ao final da aba mantendo a ordem exata das colunas."""
+    """Adiciona novas linhas ao final da aba no Google Sheets."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -66,7 +68,7 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba garantindo o alinhamento de colunas."""
+    """Substitui o conteúdo de uma aba mantendo a sincronia das colunas."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -119,6 +121,13 @@ def extrair_id_estoque_do_nome(nome_inventario):
             return num
     return ""
 
+def padronizar_id_estoque(valor):
+    """Converte valores como 1078.0 ou '1078' para a string '1078'."""
+    val_str = str(valor).strip()
+    if val_str.endswith(".0"):
+        val_str = val_str[:-2]
+    return val_str
+
 def converter_para_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -131,7 +140,7 @@ def gerar_relatorio_consolidado_excel(df_contagens, lista_estoques_ref):
         linhas_resumo = []
         for est in lista_estoques_ref:
             est_id = str(est["id"]).strip()
-            df_est = df_contagens[df_contagens['id_estoque'].astype(str).str.strip() == est_id] if not df_contagens.empty else pd.DataFrame()
+            df_est = df_contagens[df_contagens['id_estoque'].apply(padronizar_id_estoque) == est_id] if not df_contagens.empty else pd.DataFrame()
             
             total_itens = len(df_est)
             acertos = len(df_est[pd.to_numeric(df_est['diferenca'], errors='coerce') == 0]) if total_itens > 0 else 0
@@ -240,12 +249,17 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
+    # ORDENAÇÃO DE INVENTÁRIOS: MAIS RECENTES NO TOPO
     df_inventarios = ler_aba("inventarios")
     if not df_inventarios.empty and 'id' in df_inventarios.columns:
         df_inventarios['id_clean'] = df_inventarios['id'].astype(str).str.replace('#', '', regex=False).str.strip()
         df_inventarios['id_num'] = pd.to_numeric(df_inventarios['id_clean'], errors='coerce').fillna(0)
+        df_inventarios = df_inventarios[df_inventarios['id_clean'] != ""]
         df_inventarios = df_inventarios.drop_duplicates(subset=['id_clean'], keep='last')
-        df_inventarios = df_inventarios.sort_values(by=['data', 'id_num'], ascending=[False, False])
+        
+        # Ordena prioritariamente por data (decrescente) e por número de ID (decrescente)
+        df_inventarios['data_dt'] = pd.to_datetime(df_inventarios['data'], errors='coerce')
+        df_inventarios = df_inventarios.sort_values(by=['data_dt', 'id_num'], ascending=[False, False])
     else:
         df_inventarios = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
 
@@ -278,6 +292,7 @@ else:
             id_pasta_limpo_base = ""
             st.info("Crie um inventário abaixo.")
         else:
+            # O primeiro item da lista é o mais recente
             lista_inv = [f"{row['id']} – {row['nome']} ({row['status']})" for idx, row in df_inventarios.iterrows()]
             inventario_selected = st.selectbox("Selecione a Pasta", lista_inv, index=0, key="sb_pasta_ativa")
             id_inventario_atual = inventario_selected.split(" – ")[0]
@@ -311,7 +326,7 @@ else:
                     novos_itens_base = []
                     for idx_r, r in df_upload_temp.iterrows():
                         novos_itens_base.append({
-                            "id": mayor_id_b if 'id' in df_base_existente.columns else idx_r + 1,
+                            "id": maior_id_b + idx_r,
                             "inventario_id": id_pasta_limpo_base,
                             "cod_produto": str(r[col_cod]).strip() if col_cod and pd.notna(r[col_cod]) else '',
                             "desc_produto": str(r[col_desc]).strip() if col_desc and pd.notna(r[col_desc]) else '',
@@ -343,11 +358,11 @@ else:
             if st.button("🚀 Iniciar 1ª Contagem", type="primary", use_container_width=True):
                 mascara = df_inventarios['id_clean'] == id_pasta_limpo_base
                 df_inventarios.loc[mascara, 'status'] = '1a Contagem'
-                atualizar_aba_completa("inventarios", df_inventarios.drop(columns=['id_clean', 'id_num'], errors='ignore'))
+                atualizar_aba_completa("inventarios", df_inventarios.drop(columns=['id_clean', 'id_num', 'data_dt'], errors='ignore'))
                 st.success("🔒 1ª Contagem liberada.")
                 st.rerun()
 
-        # CRIAÇÃO DE NOVO INVENTÁRIO (GRAVAÇÃO DIRETA)
+        # CRIAÇÃO DE NOVO INVENTÁRIO
         with st.expander("➕ Criar Novo Inventário"):
             nome_nova_pasta = st.text_input("Nome do Inventário", key="txt_novo_nome_pasta")
             if st.button("Criar Pasta Agora", type="primary", use_container_width=True):
@@ -449,7 +464,7 @@ else:
     aba_contar, aba_lancamentos, aba_desempenho, aba_historico = abas_objs[0], abas_objs[1], abas_objs[2], abas_objs[3]
     aba_adm = abas_objs[4] if eh_supervisor else None
 
-    # --- ABA 1: CONTAR ITEM (GRAVAÇÃO DIRETA NO SHEETS) ---
+    # --- ABA 1: CONTAR ITEM ---
     with aba_contar:
         if not id_inventario_atual or base_sistema_atual.empty:
             st.warning("⚠️ Selecione um inventário ativo e carregue a base na barra lateral.")
@@ -553,10 +568,13 @@ else:
 
                                     anexar_linha_aba("contagens", df_novo_bip)
 
-                                    # Atualiza última contagem do estoque
+                                    # ATUALIZA A ABA 'ultima_contagem_estoques' COM ID LIMPO
                                     df_ultimas = ler_aba("ultima_contagem_estoques")
-                                    df_nova_dt = pd.DataFrame([{'id_estoque': id_est_limpo, 'ultima_data': data_hora_agora}])
+                                    id_est_padronizado = padronizar_id_estoque(id_est_limpo)
+                                    
+                                    df_nova_dt = pd.DataFrame([{'id_estoque': id_est_padronizado, 'ultima_data': data_hora_agora}])
                                     if not df_ultimas.empty:
+                                        df_ultimas['id_estoque'] = df_ultimas['id_estoque'].apply(padronizar_id_estoque)
                                         df_ultimas = pd.concat([df_ultimas, df_nova_dt], ignore_index=True).drop_duplicates(subset=['id_estoque'], keep='last')
                                     else:
                                         df_ultimas = df_nova_dt
@@ -574,6 +592,11 @@ else:
             df_minhas = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_pasta_limpo_base] if not df_cnts_todas.empty else pd.DataFrame()
 
             if not df_minhas.empty:
+                # Ordena os lançamentos por data e hora mais recentes no topo
+                if 'data_hora' in df_minhas.columns:
+                    df_minhas['dt_sort'] = pd.to_datetime(df_minhas['data_hora'], errors='coerce')
+                    df_minhas = df_minhas.sort_values(by='dt_sort', ascending=False).drop(columns=['dt_sort'])
+
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Lançamentos Totais", len(df_minhas))
                 m2.metric("Com Divergência", len(df_minhas[pd.to_numeric(df_minhas['diferenca'], errors='coerce') != 0]))
@@ -599,7 +622,7 @@ else:
                     a = str(row.get('ativo','')).upper().strip() if pd.notna(row.get('ativo')) and str(row.get('ativo')).lower()!='nan' else ""
                     key = f"{c}_{l}_{a}"
                     if key in mapa_contados: return f"🟩 Contabilizado por ({mapa_contados[key]})"
-                    return "🟥 Não Contado"
+                    return "独立 Não Contado"
                 
                 df_espelho = base_sistema_atual.copy()
                 df_espelho['Status de Contagem'] = df_espelho.apply(obter_status, axis=1)
@@ -616,11 +639,16 @@ else:
             df_cnts_todas = ler_aba("contagens")
             
             if not df_ult_historico.empty:
-                for _, r_h in df_ult_historico.iterrows(): mapa_datas[str(r_h.get('id_estoque','')).strip()] = str(r_h.get('ultima_data',''))
+                for _, r_h in df_ult_historico.iterrows():
+                    id_padrao = padronizar_id_estoque(r_h.get('id_estoque', ''))
+                    if id_padrao:
+                        mapa_datas[id_padrao] = str(r_h.get('ultima_data', ''))
+            
             if not df_cnts_todas.empty:
                 for _, r_u in df_cnts_todas.iterrows():
-                    id_e = str(r_u.get('id_estoque','')).strip()
-                    if id_e and id_e not in mapa_datas: mapa_datas[id_e] = str(r_u.get('data_hora',''))
+                    id_e = padronizar_id_estoque(r_u.get('id_estoque', ''))
+                    if id_e and id_e not in mapa_datas:
+                        mapa_datas[id_e] = str(r_u.get('data_hora', ''))
 
             linhas_desempenho, hoje = [], datetime.datetime.now()
             b_count, a_count, c_count = 0, 0, 0
@@ -660,7 +688,12 @@ else:
                 df_exibir = df_exibir[df_exibir['Id. Estoque'].str.lower().str.contains(termo) | df_exibir['Descrição do Estoque Físico'].str.lower().str.contains(termo)]
 
             df_exibir['Dias Sem Contar'] = df_exibir['Dias Sem Contar'].apply(lambda x: "—" if x == 999 else x)
-            st.dataframe(df_exibir.sort_values(by=['Criticidade', 'Id. Estoque'], ascending=[False, True]), use_container_width=True, hide_index=True)
+            
+            # ORDENAÇÃO DE ESTOQUES: MAIS RECENTES NO TOPO
+            df_exibir['sort_dt'] = pd.to_datetime(df_exibir['Última Contagem'], format="%d/%m/%Y %H:%M", errors='coerce')
+            df_exibir = df_exibir.sort_values(by=['sort_dt', 'Id. Estoque'], ascending=[False, True]).drop(columns=['sort_dt'])
+            
+            st.dataframe(df_exibir, use_container_width=True, hide_index=True)
 
         with sub_d2:
             st.subheader("📈 Tabela de Acuracidade Geral por Depósito")
@@ -695,15 +728,17 @@ else:
                             limpar_cache_aplicacao()
                             st.rerun()
 
-    # --- ABA 4: HISTÓRICO GERAL (LEITURA DIRETA DO SHEETS) ---
+    # --- ABA 4: HISTÓRICO GERAL (LEITURA DIRETA E MAIS RECENTES NO TOPO) ---
     with aba_historico:
         st.title("📁 Arquivo Geral de Movimentações")
         if df_inventarios.empty or 'id' not in df_inventarios.columns: 
             st.info("Nenhum inventário registrado.")
         else:
+            # Força ordenação por data e ID mais recentes
             df_inv_ordenados = df_inventarios.copy()
             df_inv_ordenados['id_num'] = pd.to_numeric(df_inv_ordenados['id'].astype(str).str.replace('#', '', regex=False), errors='coerce').fillna(0)
-            df_inv_ordenados = df_inv_ordenados.sort_values(by=['id_num'], ascending=False)
+            df_inv_ordenados['data_dt'] = pd.to_datetime(df_inv_ordenados['data'], errors='coerce')
+            df_inv_ordenados = df_inv_ordenados.sort_values(by=['data_dt', 'id_num'], ascending=[False, False])
 
             itens_por_pagina = 10
             total_itens = len(df_inv_ordenados)
@@ -720,6 +755,12 @@ else:
                 df_cnts_todas = ler_aba("contagens")
                 
                 df_h = df_cnts_todas[df_cnts_todas['inventario_id'].astype(str) == id_proc] if not df_cnts_todas.empty else pd.DataFrame()
+                
+                # Ordena bips dentro da pasta por data/hora mais recente
+                if not df_h.empty and 'data_hora' in df_h.columns:
+                    df_h['dt_sort'] = pd.to_datetime(df_h['data_hora'], errors='coerce')
+                    df_h = df_h.sort_values(by='dt_sort', ascending=False).drop(columns=['dt_sort'])
+
                 tot_reg = len(df_h)
                 acu_reg = inv.get('acuracidade_final', '—')
 
@@ -733,7 +774,7 @@ else:
                 with c_del:
                     if eh_supervisor and st.button("🗑️ Excluir Pasta", key=f"del_hist_inv_{inv['id']}", use_container_width=True):
                         df_inv_drive_att = df_inventarios[df_inventarios['id'].astype(str) != str(inv['id'])]
-                        atualizar_aba_completa("inventarios", df_inv_drive_att.drop(columns=['id_clean', 'id_num'], errors='ignore'))
+                        atualizar_aba_completa("inventarios", df_inv_drive_att.drop(columns=['id_clean', 'id_num', 'data_dt'], errors='ignore'))
                         limpar_cache_aplicacao()
                         st.rerun()
 
