@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets, limpa espaços em branco e padroniza as colunas."""
+    """Lê uma aba do Google Sheets padronizando os cabeçalhos."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -41,8 +41,39 @@ def ler_aba(nome_aba):
     except Exception:
         return pd.DataFrame()
 
+def sincronizar_upsert_inventarios(df_novos_inv):
+    """Atualiza o registro do inventário na planilha pelo ID sem duplicar linhas."""
+    try:
+        sh = conectar_gspread()
+        if sh and not df_novos_inv.empty:
+            ws = sh.worksheet("inventarios")
+            df_existente = ler_aba("inventarios")
+            
+            df_novos_inv['id_clean'] = df_novos_inv['id'].astype(str).str.replace('#', '', regex=False).str.strip()
+            
+            if not df_existente.empty:
+                df_existente['id_clean'] = df_existente['id'].astype(str).str.replace('#', '', regex=False).str.strip()
+                ids_novos = df_novos_inv['id_clean'].tolist()
+                df_mantidos = df_existente[~df_existente['id_clean'].isin(ids_novos)]
+                df_final = pd.concat([df_mantidos, df_novos_inv], ignore_index=True)
+            else:
+                df_final = df_novos_inv
+
+            if 'id_clean' in df_final.columns:
+                df_final = df_final.drop(columns=['id_clean'])
+                
+            df_final = df_final.astype(str)
+            ws.clear()
+            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            st.cache_data.clear()
+            return True
+        return False
+    except Exception as e:
+        st.error(f"❌ Erro ao sincronizar inventários: {e}")
+        return False
+
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Anexa novos dados ao final da aba SEM apagar o histórico existente."""
+    """Adiciona os registros ao final da aba mantendo o histórico existente."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -50,17 +81,14 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
             novos_dados_df.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in novos_dados_df.columns]
             
             df_existente = ler_aba(nome_aba)
-            
             if not df_existente.empty:
                 df_final = pd.concat([df_existente, novos_dados_df], ignore_index=True)
-                df_final = df_final.astype(str)
-                ws.clear()
-                ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
             else:
-                df_final = novos_dados_df.astype(str)
-                ws.clear()
-                ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+                df_final = novos_dados_df
                 
+            df_final = df_final.astype(str)
+            ws.clear()
+            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
             st.cache_data.clear()
             return True
         return False
@@ -69,15 +97,18 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba com segurança."""
+    """Substitui o conteúdo de uma aba garantindo a limpeza das linhas antigas."""
     try:
         sh = conectar_gspread()
-        if sh and not df_completo.empty:
+        if sh:
             ws = sh.worksheet(nome_aba)
-            df_completo.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in df_completo.columns]
-            df_completo = df_completo.astype(str)
-            ws.clear()
-            ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
+            if not df_completo.empty:
+                df_completo.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in df_completo.columns]
+                df_completo = df_completo.astype(str)
+                ws.clear()
+                ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
+            else:
+                ws.clear()
             st.cache_data.clear()
             return True
         return False
@@ -216,7 +247,7 @@ def sincronizar_ram_com_banco():
     sucesso_total = True
     
     if tot_inv > 0:
-        if salvar_lote_aba("inventarios", pd.DataFrame(st.session_state.buffer_ram_inventarios)):
+        if sincronizar_upsert_inventarios(pd.DataFrame(st.session_state.buffer_ram_inventarios)):
             st.session_state.buffer_ram_inventarios = []
         else: sucesso_total = False
         
@@ -286,7 +317,6 @@ else:
     if not df_inv_drive.empty and 'id' in df_inv_drive.columns:
         df_inv_drive['id_clean'] = df_inv_drive['id'].astype(str).str.replace('#', '', regex=False).str.strip()
         df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id_clean'], errors='coerce').fillna(0)
-        # Remove duplicidades mantendo sempre a última versão gravada no Google Sheets
         df_inv_drive = df_inv_drive.drop_duplicates(subset=['id_clean'], keep='last')
     else:
         df_inv_drive = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
@@ -394,12 +424,16 @@ else:
         if inventario_selected_obj is not None and str(inventario_selected_obj['status']) == "Aberto" and not base_sistema_atual.empty:
             st.markdown("---")
             if st.button("🚀 Salvar Base e Iniciar 1ª Contagem", type="primary", use_container_width=True):
-                sincronizar_ram_com_banco()
+                for inv in st.session_state.buffer_ram_inventarios:
+                    if str(inv['id']) == str(id_inventario_atual):
+                        inv['status'] = '1a Contagem'
+
                 df_inv_drive = ler_aba("inventarios")
                 if not df_inv_drive.empty:
                     df_inv_drive.loc[df_inv_drive['id'].astype(str) == str(id_inventario_atual), 'status'] = '1a Contagem'
-                    atualizar_aba_completa("inventarios", df_inv_drive)
+                    sincronizar_upsert_inventarios(df_inv_drive)
 
+                sincronizar_ram_com_banco()
                 limpar_cache_aplicacao()
                 st.success("🔒 1ª Contagem liberada.")
                 st.rerun()
@@ -474,10 +508,11 @@ else:
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
                     id_limpo_str = str(id_inv).replace('#', '').strip()
-                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'status'] = 'Fechado'
-                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'total_itens'] = tot
-                    df_inv_up.loc[df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str, 'acuracidade_final'] = pct_acu
-                    atualizar_aba_completa("inventarios", df_inv_up)
+                    mascara = df_inv_up['id'].astype(str).str.replace('#', '').str.strip() == id_limpo_str
+                    df_inv_up.loc[mascara, 'status'] = 'Fechado'
+                    df_inv_up.loc[mascara, 'total_itens'] = tot
+                    df_inv_up.loc[mascara, 'acuracidade_final'] = pct_acu
+                    sincronizar_upsert_inventarios(df_inv_up)
                 limpar_cache_aplicacao()
 
             if pode_fechar:
@@ -728,7 +763,7 @@ else:
             k1, k2, k3 = st.columns(3)
             k1.metric("🟢 Em Dia (até 7 dias)", b_count)
             k2.metric("🟡 Necessário Auditar (8 a 14 dias)", a_count)
-            k3.metric("🔴 Crítico (+14 dias)", c_count)
+            k3.metric("🔴 Crítico (+2 semanas)", c_count)
             
             col_f_stat, col_f_busca = st.columns([1, 1])
             filtro_criticidade = col_f_stat.selectbox("🎯 Filtrar por Criticidade:", ["Todos os Estoques", "🟢 Em Dia", "🟡 Necessário Auditar", "🔴 Crítico (+2 semanas)"])
@@ -874,7 +909,7 @@ else:
                                 if not df_inv_all.empty:
                                     mascara_pasta = df_inv_all['id'].astype(str).str.replace('#', '').str.strip() == id_pasta_target
                                     df_inv_all.loc[mascara_pasta, 'status'] = '2a Contagem'
-                                    atualizar_aba_completa("inventarios", df_inv_all)
+                                    sincronizar_upsert_inventarios(df_inv_all)
 
                                 for inv_r in st.session_state.buffer_ram_inventarios:
                                     if str(inv_r['id']).replace('#', '').strip() == id_pasta_target:
