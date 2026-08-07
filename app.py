@@ -27,7 +27,7 @@ def conectar_gspread():
         return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets sem perder registros."""
+    """Lê uma aba do Google Sheets, limpa espaços em branco e padroniza as colunas."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -35,7 +35,7 @@ def ler_aba(nome_aba):
             dados = ws.get_all_records()
             if dados:
                 df = pd.DataFrame(dados).fillna("")
-                df.columns = [str(c).strip().lower() for c in df.columns]
+                df.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in df.columns]
                 return df
         return pd.DataFrame()
     except Exception:
@@ -47,21 +47,16 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
             ws = sh.worksheet(nome_aba)
+            novos_dados_df.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in novos_dados_df.columns]
             
-            # Normaliza cabeçalhos
-            novos_dados_df.columns = [str(c).strip().lower() for c in novos_dados_df.columns]
-            
-            # Lê o cabeçalho existente da planilha para alinhar as colunas
             df_existente = ler_aba(nome_aba)
             
             if not df_existente.empty:
-                # Mantém as colunas na mesma ordem e faz o merge seguro
                 df_final = pd.concat([df_existente, novos_dados_df], ignore_index=True)
                 df_final = df_final.astype(str)
                 ws.clear()
                 ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
             else:
-                # Se a planilha estava zerada, insere com cabeçalho
                 df_final = novos_dados_df.astype(str)
                 ws.clear()
                 ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
@@ -74,12 +69,12 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba apenas quando estritamente necessário."""
+    """Substitui o conteúdo de uma aba com segurança."""
     try:
         sh = conectar_gspread()
         if sh and not df_completo.empty:
             ws = sh.worksheet(nome_aba)
-            df_completo.columns = [str(c).strip().lower() for c in df_completo.columns]
+            df_completo.columns = [str(c).replace('\xa0', ' ').strip().lower() for c in df_completo.columns]
             df_completo = df_completo.astype(str)
             ws.clear()
             ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
@@ -289,13 +284,17 @@ if not st.session_state.logged_in:
 else:
     df_inv_drive = ler_aba("inventarios")
     if not df_inv_drive.empty and 'id' in df_inv_drive.columns:
-        df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id'].astype(str).str.replace('#', '', regex=False), errors='coerce').fillna(0)
+        df_inv_drive['id_clean'] = df_inv_drive['id'].astype(str).str.replace('#', '', regex=False).str.strip()
+        df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id_clean'], errors='coerce').fillna(0)
+        # Remove duplicidades mantendo sempre a última versão gravada no Google Sheets
+        df_inv_drive = df_inv_drive.drop_duplicates(subset=['id_clean'], keep='last')
     else:
         df_inv_drive = pd.DataFrame(columns=['id', 'nome', 'data', 'status', 'total_itens', 'acuracidade_final'])
 
     if st.session_state.buffer_ram_inventarios:
         df_inv_ram = pd.DataFrame(st.session_state.buffer_ram_inventarios)
-        df_inventarios = pd.concat([df_inv_ram, df_inv_drive], ignore_index=True).drop_duplicates(subset=['id'], keep='first')
+        df_inv_ram['id_clean'] = df_inv_ram['id'].astype(str).str.replace('#', '', regex=False).str.strip()
+        df_inventarios = pd.concat([df_inv_ram, df_inv_drive], ignore_index=True).drop_duplicates(subset=['id_clean'], keep='first')
     else:
         df_inventarios = df_inv_drive.copy()
 
