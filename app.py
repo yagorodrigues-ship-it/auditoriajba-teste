@@ -49,7 +49,6 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
             ws = sh.worksheet(nome_aba)
             df_ex = ler_aba(nome_aba)
             
-            # Normaliza cabeçalhos
             novos_dados_df.columns = [str(c).strip().lower() for c in novos_dados_df.columns]
             
             if not df_ex.empty:
@@ -281,7 +280,6 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
-    # LÊ DO GOOGLE SHEETS E COMBINA COM A MEMÓRIA RAM
     df_inv_drive = ler_aba("inventarios")
     if not df_inv_drive.empty and 'id' in df_inv_drive.columns:
         df_inv_drive['id_num'] = pd.to_numeric(df_inv_drive['id'].astype(str).str.replace('#', '', regex=False), errors='coerce').fillna(0)
@@ -451,17 +449,14 @@ else:
 
             st.markdown("---")
             def fechar_e_preservar_historico(id_inv, id_limpo):
-                # 1. Envia tudo para o Google Sheets
                 sincronizar_ram_com_banco()
                 
-                # 2. Recarrega as contagens para calcular acuracidade
                 df_cnts = ler_aba("contagens")
                 df_f = df_cnts[df_cnts['inventario_id'].astype(str) == id_limpo] if not df_cnts.empty else pd.DataFrame()
                 tot = len(df_f)
                 acertos = len(df_f[pd.to_numeric(df_f['diferenca'], errors='coerce') == 0]) if tot > 0 else 0
                 pct_acu = f"{(acertos / tot)*100:.1f}%" if tot > 0 else "0%"
                 
-                # 3. Atualiza o status na planilha
                 df_inv_up = ler_aba("inventarios")
                 if not df_inv_up.empty:
                     df_inv_up.loc[df_inv_up['id'].astype(str) == str(id_inv), 'status'] = 'Fechado'
@@ -541,7 +536,9 @@ else:
                     set_ja_contados = set()
                     if not df_cnts_exist_pasta.empty:
                         for _, r in df_cnts_exist_pasta[df_cnts_exist_pasta['cod_produto'].astype(str).str.upper().str.strip() == codigo_rastreio].iterrows():
-                            set_ja_contados.add(f"{str(r.get('lote', '')).strip().upper()}_{str(r.get('ativo', '')).strip().upper()}")
+                            # Se for 2a Contagem, permite re-bipar o item liberado
+                            if str(r.get('fase_contagem', '')) != '2a Contagem':
+                                set_ja_contados.add(f"{str(r.get('lote', '')).strip().upper()}_{str(r.get('ativo', '')).strip().upper()}")
                     
                     for r_ram in st.session_state.buffer_ram_contagens:
                         if str(r_ram['cod_produto']).upper().strip() == codigo_rastreio:
@@ -661,7 +658,7 @@ else:
                     a = str(row.get('ativo','')).upper().strip() if pd.notna(row.get('ativo')) and str(row.get('ativo')).lower()!='nan' else ""
                     key = f"{c}_{l}_{a}"
                     if key in mapa_contados: return f"🟩 Contabilizado por ({mapa_contados[key]})"
-                    return "🟥 Não Contado"
+                    return "スカ Não Contado"
                 
                 df_espelho = base_sistema_atual.copy()
                 df_espelho['Status de Contagem'] = df_espelho.apply(obter_status, axis=1)
@@ -757,7 +754,7 @@ else:
                             limpar_cache_aplicacao()
                             st.rerun()
 
-    # --- ABA 4: HISTÓRICO GERAL (VISÍVEL PARA TODOS OS COLABORADORES) ---
+    # --- ABA 4: HISTÓRICO GERAL ---
     with aba_historico:
         st.title("📁 Arquivo Geral de Movimentações")
         if df_inventarios.empty or 'id' not in df_inventarios.columns: 
@@ -846,11 +843,26 @@ else:
                         col_act1, col_act2 = st.columns(2)
                         with col_act1:
                             if st.button("🚨 Abrir 2ª Contagem", type="primary", use_container_width=True):
+                                # 1. Atualiza a fase do item para "2a Contagem"
                                 df_cnts.loc[idx_sel, 'fase_contagem'] = '2a Contagem'
                                 df_cnts.loc[idx_sel, 'observacao'] = f"ADM ({st.session_state.operador}): [LIBERADO 2ª CONTAGEM] - {justificativa_adm.strip()}"
                                 atualizar_aba_completa("contagens", df_cnts.drop(columns=['diferenca_num']))
-                                st.success("✅ Enviado para 2ª Contagem!")
+                                
+                                # 2. REABRE A PASTA ASSOCIADA (muda status para '2a Contagem')
+                                id_pasta_target = str(row_target['inventario_id']).replace('#', '').strip()
+                                df_inv_all = ler_aba("inventarios")
+                                if not df_inv_all.empty:
+                                    df_inv_all.loc[df_inv_all['id'].astype(str).str.replace('#', '').str.strip() == id_pasta_target, 'status'] = '2a Contagem'
+                                    atualizar_aba_completa("inventarios", df_inv_all)
+
+                                # 3. Atualiza na memória RAM se estiver lá
+                                for inv_r in st.session_state.buffer_ram_inventarios:
+                                    if str(inv_r['id']).replace('#', '').strip() == id_pasta_target:
+                                        inv_r['status'] = '2a Contagem'
+
+                                st.success("✅ Item liberado e Pasta Reaberta para 2ª Contagem!")
                                 st.rerun()
+
                         with col_act2:
                             if st.button("🔒 Finalizar e Manter Divergência", use_container_width=True):
                                 df_cnts.loc[idx_sel, 'fase_contagem'] = 'Encerrado com Divergencia'
