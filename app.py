@@ -18,14 +18,16 @@ def ler_aba(nome_aba):
     """Lê uma aba da planilha do Google Drive usando Service Account."""
     try:
         df = conn_gsheets.read(worksheet=nome_aba, ttl=0)
-        df = df.fillna("")
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        return df
-    except Exception as e:
+        if df is not None and not df.empty:
+            df = df.fillna("")
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            return df
+        return pd.DataFrame()
+    except Exception:
         return pd.DataFrame()
 
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Grava novos dados na planilha do Google Drive."""
+    """Grava novos dados na planilha do Google Drive garantindo a inclusão das linhas."""
     try:
         df_ex = ler_aba(nome_aba)
         if not df_ex.empty:
@@ -33,21 +35,24 @@ def salvar_lote_aba(nome_aba, novos_dados_df):
         else:
             df_final = novos_dados_df
         
+        # Converte tudo para string para evitar erros de tipo no Google Sheets
+        df_final = df_final.astype(str)
         conn_gsheets.update(worksheet=nome_aba, data=df_final)
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar na aba {nome_aba}: {e}")
+        st.error(f"❌ Erro ao salvar na aba '{nome_aba}': {e}")
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
     """Substitui a aba inteira na planilha."""
     try:
+        df_completo = df_completo.astype(str)
         conn_gsheets.update(worksheet=nome_aba, data=df_completo)
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Erro ao atualizar aba {nome_aba}: {e}")
+        st.error(f"❌ Erro ao atualizar aba '{nome_aba}': {e}")
         return False
 
 # --- LISTA OFICIAL E UNIFICADA DE ESTOQUES JBA ---
@@ -169,7 +174,6 @@ if 'contador_reset_sup' not in st.session_state: st.session_state.contador_reset
 if 'bases_supervisor_por_inv' not in st.session_state: st.session_state.bases_supervisor_por_inv = {}
 if 'pagina_historico' not in st.session_state: st.session_state.pagina_historico = 1
 
-# BUFFERS EM RAM PARA OPERAÇÕES INSTANTÂNEAS
 if 'buffer_ram_inventarios' not in st.session_state: st.session_state.buffer_ram_inventarios = []
 if 'buffer_ram_contagens' not in st.session_state: st.session_state.buffer_ram_contagens = []
 if 'buffer_ram_bases' not in st.session_state: st.session_state.buffer_ram_bases = []
@@ -179,36 +183,39 @@ def sincronizar_ram_com_banco():
     tot_cnt = len(st.session_state.buffer_ram_contagens)
     tot_bas = len(st.session_state.buffer_ram_bases)
     
+    sucesso_total = True
+    
     if tot_inv > 0:
-        salvar_lote_aba("inventarios", pd.DataFrame(st.session_state.buffer_ram_inventarios))
-        st.session_state.buffer_ram_inventarios = []
+        if salvar_lote_aba("inventarios", pd.DataFrame(st.session_state.buffer_ram_inventarios)):
+            st.session_state.buffer_ram_inventarios = []
+        else: sucesso_total = False
         
     if tot_cnt > 0:
         df_cnts_ram = pd.DataFrame(st.session_state.buffer_ram_contagens)
-        salvar_lote_aba("contagens", df_cnts_ram)
-        
-        # Atualiza última data dos estoques
-        df_ultimas = ler_aba("ultima_contagem_estoques")
-        novas_datas = []
-        for item in st.session_state.buffer_ram_contagens:
-            if item.get('id_estoque'):
-                novas_datas.append({'id_estoque': str(item['id_estoque']), 'ultima_data': str(item['data_hora'])})
-        if novas_datas:
-            df_novas_dt = pd.DataFrame(novas_datas)
-            if not df_ultimas.empty:
-                df_ultimas = pd.concat([df_ultimas, df_novas_dt], ignore_index=True).drop_duplicates(subset=['id_estoque'], keep='last')
-            else:
-                df_ultimas = df_novas_dt
-            atualizar_aba_completa("ultima_contagem_estoques", df_ultimas)
-            
-        st.session_state.buffer_ram_contagens = []
+        if salvar_lote_aba("contagens", df_cnts_ram):
+            # Atualiza última data dos estoques
+            df_ultimas = ler_aba("ultima_contagem_estoques")
+            novas_datas = []
+            for item in st.session_state.buffer_ram_contagens:
+                if item.get('id_estoque'):
+                    novas_datas.append({'id_estoque': str(item['id_estoque']), 'ultima_data': str(item['data_hora'])})
+            if novas_datas:
+                df_novas_dt = pd.DataFrame(novas_datas)
+                if not df_ultimas.empty:
+                    df_ultimas = pd.concat([df_ultimas, df_novas_dt], ignore_index=True).drop_duplicates(subset=['id_estoque'], keep='last')
+                else:
+                    df_ultimas = df_novas_dt
+                atualizar_aba_completa("ultima_contagem_estoques", df_ultimas)
+            st.session_state.buffer_ram_contagens = []
+        else: sucesso_total = False
 
     if tot_bas > 0:
-        salvar_lote_aba("itens_base_inventario", pd.DataFrame(st.session_state.buffer_ram_bases))
-        st.session_state.buffer_ram_bases = []
+        if salvar_lote_aba("itens_base_inventario", pd.DataFrame(st.session_state.buffer_ram_bases)):
+            st.session_state.buffer_ram_bases = []
+        else: sucesso_total = False
 
     limpar_cache_aplicacao()
-    return tot_inv + tot_cnt + tot_bas
+    return (tot_inv + tot_cnt + tot_bas) if sucesso_total else 0
 
 # --- TELA DE LOGIN CENTRALIZADA ---
 if not st.session_state.logged_in:
@@ -243,34 +250,6 @@ if not st.session_state.logged_in:
                             st.rerun()
                         else:
                             st.error("❌ Base de usuários vazia no Google Sheets.")
-            if st.button("📝 Criar nova conta de colaborador", use_container_width=True):
-                st.session_state.tela_acesso = "cadastro"
-                st.rerun()
-
-        elif st.session_state.tela_acesso == "cadastro":
-            st.title("📝 Cadastro de Colaborador")
-            with st.form("cadastro_form"):
-                novo_nome = st.text_input("Nome Completo")
-                novo_cpf = st.text_input("CPF (Apenas números)")
-                novo_email = st.text_input("E-mail")
-                nova_senha = st.text_input("Senha", type="password")
-                confirma_senha = st.text_input("Confirme a Senha", type="password")
-                if st.form_submit_button("Finalizar Cadastro", type="primary", use_container_width=True):
-                    cpf_l = limpar_documento(novo_cpf)
-                    if not novo_nome or not cpf_l or not novo_email or not nova_senha: st.error("⚠️ Preencha todos os campos!")
-                    elif nova_senha != confirma_senha: st.error("❌ Senhas divergentes!")
-                    else:
-                        df_novo_usr = pd.DataFrame([{
-                            "nome": novo_nome.strip(), "cpf": cpf_l,
-                            "email": novo_email.strip(), "senha": nova_senha, "perfil": "Almoxarife"
-                        }])
-                        salvar_lote_aba("usuarios", df_novo_usr)
-                        st.success("✅ Cadastro realizado no Google Sheets!")
-                        st.session_state.tela_acesso = "login"
-                        st.rerun()
-            if st.button("◀ Voltar para o Login"):
-                st.session_state.tela_acesso = "login"
-                st.rerun()
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
@@ -444,8 +423,9 @@ else:
 
             st.markdown("---")
             def fechar_e_preservar_historico(id_inv, id_limpo):
-                if pendentes_totais > 0:
-                    sincronizar_ram_com_banco()
+                # Força o envio antes de fechar
+                sincronizar_ram_com_banco()
+                
                 df_cnts = ler_aba("contagens")
                 df_f = df_cnts[df_cnts['inventario_id'].astype(str) == id_limpo] if not df_cnts.empty else pd.DataFrame()
                 tot = len(df_f)
@@ -487,7 +467,10 @@ else:
         if st.button("🚀 Sincronizar Agora com o Drive", type="primary", use_container_width=True):
             if pendentes_totais > 0:
                 qtd = sincronizar_ram_com_banco()
-                st.success(f"✅ {qtd} alterações enviadas para a planilha do Drive!")
+                if qtd > 0:
+                    st.success(f"✅ {qtd} alterações enviadas para a planilha do Drive!")
+                else:
+                    st.error("❌ Falha na gravação. Verifique as credenciais nos Secrets.")
             else:
                 st.info("ℹ️ Nenhuma alteração pendente em RAM.")
             st.rerun()
