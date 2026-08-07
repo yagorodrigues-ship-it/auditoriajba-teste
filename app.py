@@ -10,7 +10,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Auditoria & Inventário - JBA (Google Sheets Direto)", layout="wide")
+st.set_page_config(page_title="Auditoria & Inventário - JBA", layout="wide")
 
 # --- CONEXÃO DIRETA COM O GOOGLE SHEETS VIA SERVICE ACCOUNT ---
 @st.cache_resource
@@ -42,7 +42,7 @@ def ler_aba(nome_aba):
         return pd.DataFrame()
 
 def anexar_linha_aba(nome_aba, novos_dados_df):
-    """Adiciona novas linhas ao final da aba no Google Sheets em tempo real."""
+    """Adiciona novas linhas ao final da aba mantendo a ordem exata das colunas."""
     try:
         sh = conectar_gspread()
         if sh and not novos_dados_df.empty:
@@ -66,7 +66,7 @@ def anexar_linha_aba(nome_aba, novos_dados_df):
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui o conteúdo de uma aba mantendo a sincronia."""
+    """Substitui o conteúdo de uma aba garantindo o alinhamento de colunas."""
     try:
         sh = conectar_gspread()
         if sh:
@@ -85,7 +85,7 @@ def atualizar_aba_completa(nome_aba, df_completo):
         st.error(f"❌ Erro ao atualizar aba '{nome_aba}': {e}")
         return False
 
-# --- LISTA OFICIAL E UNIFICADA DE ESTOQUES JBA ---
+# --- LISTA OFICIAL DE ESTOQUES JBA ---
 LISTA_ESTOQUES_FIXA = [
     {"id": "1077", "desc": "JBA - CLASSE D"}, {"id": "1078", "desc": "JBA - COPA E COZINHA"},
     {"id": "1080", "desc": "JBA - DADOS - CLIENTE"}, {"id": "1082", "desc": "JBA - VIVO VITA - CLIENTE"},
@@ -194,7 +194,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- INICIALIZAÇÃO DE ESTADOS EM SESSÃO ---
+# --- INICIALIZAÇÃO DE ESTADOS ---
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
 if 'operador' not in st.session_state: st.session_state.operador = ""
 if 'perfil_usuario' not in st.session_state: st.session_state.perfil_usuario = "Almoxarife"
@@ -204,7 +204,7 @@ if 'contador_reset_sup' not in st.session_state: st.session_state.contador_reset
 if 'bases_supervisor_por_inv' not in st.session_state: st.session_state.bases_supervisor_por_inv = {}
 if 'pagina_historico' not in st.session_state: st.session_state.pagina_historico = 1
 
-# --- TELA DE LOGIN CENTRALIZADA ---
+# --- TELA DE LOGIN ---
 if not st.session_state.logged_in:
     col_vaz1, col_central, col_vaz2 = st.columns([1, 1.2, 1])
     with col_central:
@@ -240,7 +240,6 @@ if not st.session_state.logged_in:
 
 # --- APLICAÇÃO PRINCIPAL LOGADA ---
 else:
-    # LÊ INVENTÁRIOS DIRETO DO GOOGLE SHEETS
     df_inventarios = ler_aba("inventarios")
     if not df_inventarios.empty and 'id' in df_inventarios.columns:
         df_inventarios['id_clean'] = df_inventarios['id'].astype(str).str.replace('#', '', regex=False).str.strip()
@@ -256,7 +255,7 @@ else:
     # --- BARRA LATERAL ---
     with st.sidebar:
         st.write(f"👤 **{st.session_state.operador}** ({st.session_state.perfil_usuario})")
-        st.success("🟢 Conectado ao Google Sheets em tempo real.")
+        st.success("🟢 Sincronização direta com Google Sheets ativa.")
 
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -306,9 +305,13 @@ else:
                 if not col_cod or not col_desc:
                     st.error("❌ Planilha fora do padrão JBA.")
                 else:
+                    df_base_existente = ler_aba("itens_base_inventario")
+                    maior_id_b = len(df_base_existente) + 1 if not df_base_existente.empty else 1
+                    
                     novos_itens_base = []
-                    for _, r in df_upload_temp.iterrows():
+                    for idx_r, r in df_upload_temp.iterrows():
                         novos_itens_base.append({
+                            "id": mayor_id_b if 'id' in df_base_existente.columns else idx_r + 1,
                             "inventario_id": id_pasta_limpo_base,
                             "cod_produto": str(r[col_cod]).strip() if col_cod and pd.notna(r[col_cod]) else '',
                             "desc_produto": str(r[col_desc]).strip() if col_desc and pd.notna(r[col_desc]) else '',
@@ -320,7 +323,6 @@ else:
                             "ativo": str(r[col_ativo]).strip() if col_ativo and pd.notna(r[col_ativo]) and str(r[col_ativo]).lower() != 'nan' else ''
                         })
                     
-                    df_base_existente = ler_aba("itens_base_inventario")
                     if not df_base_existente.empty:
                         df_base_existente = df_base_existente[df_base_existente['inventario_id'].astype(str) != id_pasta_limpo_base]
                     
@@ -345,7 +347,7 @@ else:
                 st.success("🔒 1ª Contagem liberada.")
                 st.rerun()
 
-        # CRIAÇÃO DE NOVO INVENTÁRIO (SALVA DIRETO NO SHEETS)
+        # CRIAÇÃO DE NOVO INVENTÁRIO (GRAVAÇÃO DIRETA)
         with st.expander("➕ Criar Novo Inventário"):
             nome_nova_pasta = st.text_input("Nome do Inventário", key="txt_novo_nome_pasta")
             if st.button("Criar Pasta Agora", type="primary", use_container_width=True):
@@ -364,7 +366,7 @@ else:
                         "acuracidade_final": "0%"
                     }])
                     anexar_linha_aba("inventarios", df_novo_inv)
-                    st.toast(f"✅ Pasta {novo_id_str} criada e salva no Google Sheets!", icon="🎉")
+                    st.toast(f"✅ Pasta {novo_id_str} registrada no Google Sheets!", icon="🎉")
                     time.sleep(0.3)
                     st.rerun()
 
@@ -527,7 +529,11 @@ else:
                                     fase_gravar = "2a Contagem Concluida" if status_pasta_atual == "2a Contagem" else status_pasta_atual
                                     data_hora_agora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                                    df_cnts_exist_global = ler_aba("contagens")
+                                    maior_id_cnt = len(df_cnts_exist_global) + 1 if not df_cnts_exist_global.empty else 1
+
                                     df_novo_bip = pd.DataFrame([{
+                                        'id': maior_id_cnt,
                                         'inventario_id': id_pasta_limpo_base,
                                         'id_estoque': id_est_limpo,
                                         'desc_estoque': desc_est_limpo,
