@@ -4,50 +4,81 @@ import datetime
 import io
 import re
 import time
-from streamlit_gsheets import GSheetsConnection
+import gspread
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Auditoria & Inventário - JBA (TESTE DRIVE)", layout="wide")
 
-# --- CONEXÃO COM O GOOGLE SHEETS ---
-conn_gsheets = st.connection("gsheets", type=GSheetsConnection)
+# --- CONEXÃO DIRETA COM GOOGLE SHEETS (GSPREAD) ---
+def obter_conexao_sheets():
+    try:
+        url = st.secrets["gconfigs"]["spreadsheet_url"]
+        gc = gspread.public_client()
+        sh = gc.open_by_url(url)
+        return sh
+    except Exception as e:
+        try:
+            url = st.secrets["gconfigs"]["spreadsheet_url"]
+            gc = gspread.api_client()
+            return gc.open_by_url(url)
+        except Exception:
+            return None
 
 def ler_aba(nome_aba):
-    """Lê uma aba do Google Sheets e retorna como DataFrame."""
+    """Lê uma aba pública da planilha."""
     try:
-        df = conn_gsheets.read(worksheet=nome_aba, ttl=0)
-        return df.fillna("")
-    except Exception as e:
-        st.error(f"Erro ao ler aba {nome_aba}: {e}")
+        sh = obter_conexao_sheets()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            dados = ws.get_all_records()
+            return pd.DataFrame(dados).fillna("")
         return pd.DataFrame()
+    except Exception:
+        try:
+            url = st.secrets["gconfigs"]["spreadsheet_url"]
+            key = url.split("/d/")[1].split("/")[0]
+            csv_url = f"https://docs.google.com/spreadsheets/d/{key}/gviz/tq?tqx=out:csv&sheet={nome_aba}"
+            df = pd.read_csv(csv_url)
+            return df.fillna("")
+        except Exception:
+            return pd.DataFrame()
 
 def salvar_lote_aba(nome_aba, novos_dados_df):
-    """Insere novos registros no final da aba do Google Sheets."""
+    """Envia novos dados para a planilha."""
     try:
-        df_existente = ler_aba(nome_aba)
-        if not df_existente.empty:
-            # Padroniza maiúsculas/minúsculas para alinhar com os cabeçalhos
-            df_final = pd.concat([df_existente, novos_dados_df], ignore_index=True)
+        df_ex = ler_aba(nome_aba)
+        if not df_ex.empty:
+            df_final = pd.concat([df_ex, novos_dados_df], ignore_index=True)
         else:
             df_final = novos_dados_df
         
-        conn_gsheets.update(worksheet=nome_aba, data=df_final)
-        st.cache_data.clear()
-        return True
+        sh = obter_conexao_sheets()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            ws.clear()
+            ws.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+            st.cache_data.clear()
+            return True
+        return False
     except Exception as e:
         st.error(f"Erro ao salvar na aba {nome_aba}: {e}")
         return False
 
 def atualizar_aba_completa(nome_aba, df_completo):
-    """Substitui a aba inteira no Google Sheets."""
+    """Substitui o conteúdo de uma aba."""
     try:
-        conn_gsheets.update(worksheet=nome_aba, data=df_completo)
-        st.cache_data.clear()
-        return True
+        sh = obter_conexao_sheets()
+        if sh:
+            ws = sh.worksheet(nome_aba)
+            ws.clear()
+            ws.update([df_completo.columns.values.tolist()] + df_completo.values.tolist())
+            st.cache_data.clear()
+            return True
+        return False
     except Exception as e:
-        st.error(f"Erro ao atualizar a aba {nome_aba}: {e}")
+        st.error(f"Erro ao atualizar aba {nome_aba}: {e}")
         return False
 
 # --- LISTA OFICIAL E UNIFICADA DE ESTOQUES JBA ---
@@ -384,7 +415,7 @@ else:
                 st.success("🔒 1ª Contagem liberada.")
                 st.rerun()
 
-        # CRIAÇÃO DE NOVO INVENTÁRIO (AJUSTADO E GARANTIDO)
+        # CRIAÇÃO DE NOVO INVENTÁRIO
         with st.expander("➕ Criar Novo Inventário"):
             with st.form("form_novo", clear_on_submit=True):
                 novo_nome = st.text_input("Nome do Inventário")
